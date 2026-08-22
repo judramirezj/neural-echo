@@ -1,0 +1,18 @@
+[project]
+name = "tribe-logo-scoring"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.11.1",
+    "moviepy>=2.2.1",
+    "pillow>=11.3.0",
+    "python-dotenv>=1.2.3",
+    "scikit-learn>=1.8.0",
+    "tribev2",
+]
+
+[tool.uv.sources]
+tribev2 = { git = "https://github.com/facebookresearch/tribev2.git" }

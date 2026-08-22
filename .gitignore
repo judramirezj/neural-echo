@@ -1,0 +1,15 @@
+# secrets
+.env
+.env.*
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# uv / venvs
+.venv/
+
+# downloaded model weights / feature cache (large binaries)
+cache/
+*.ckpt
