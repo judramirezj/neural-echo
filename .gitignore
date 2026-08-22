@@ -13,3 +13,5 @@ __pycache__/
 # downloaded model weights / feature cache (large binaries)
 cache/
 *.ckpt
+
+.DS_Store
