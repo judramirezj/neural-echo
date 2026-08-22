@@ -17,9 +17,10 @@ services:
     # encoder) and CLAP both load and stay warm in this one process; measured
     # locally at ~1.3GB RSS for TRIBE ALONE on just an 8s clip (see
     # FINDINGS.md), before adding CLAP + torch/runtime overhead + real 45s
-    # audio. Pro (4GB) billed per-second — affordable for a short hackathon
-    # run; bump to pro-plus (8GB) if this still OOMs on a real job.
-    plan: pro
+    # audio. Going straight to pro-plus (8GB) for a short-lived hackathon
+    # deployment ($175/mo billed per-second — a few days is a few dollars)
+    # rather than fine-tuning the minimum viable tier.
+    plan: pro plus
     healthCheckPath: /health
     envVars:
       - key: ELEVENLABS_API_KEY
