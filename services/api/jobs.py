@@ -9,6 +9,7 @@ would drop or duplicate events across multiple/reconnecting SSE clients.
 """
 import asyncio
 import logging
+import os
 import threading
 import time
 import uuid
@@ -21,7 +22,9 @@ from neural_echo.optimizer import CandidateResult, GenerationResult, OptimizerRu
 logger = logging.getLogger(__name__)
 
 JOBS_DIR = Path("data/jobs")
-STUB_CLIPS_DIR = Path("data/clip_library/raw")
+# See main.py's CALIBRATION_BUNDLE_PATH comment — same reasoning, configurable
+# so it can be baked into the image outside any mounted persistent disk.
+STUB_CLIPS_DIR = Path(os.environ.get("STUB_CLIPS_DIR", "data/clip_library/raw"))
 
 
 def _candidate_to_dict(c: CandidateResult) -> dict:

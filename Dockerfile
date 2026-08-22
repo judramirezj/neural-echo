@@ -18,8 +18,16 @@ RUN uv sync --frozen --no-dev
 
 COPY neural_echo/ ./neural_echo/
 COPY services/ ./services/
-COPY data/clip_library/calibration_bundle.npz ./data/clip_library/calibration_bundle.npz
-COPY data/clip_library/raw/ ./data/clip_library/raw/
+
+# Baked outside /app/data on purpose: render.yaml mounts a persistent disk at
+# /app/data, which would shadow/hide anything COPY'd there at build time
+# (mounting an empty volume over a directory replaces its contents). Calibration
+# data is static and image-baked; /app/data is for runtime state (job artifacts,
+# generated candidates, model cache) that should persist across deploys instead.
+COPY data/clip_library/calibration_bundle.npz ./calibration_baked/calibration_bundle.npz
+COPY data/clip_library/raw/ ./calibration_baked/raw/
+ENV CALIBRATION_BUNDLE_PATH=/app/calibration_baked/calibration_bundle.npz
+ENV STUB_CLIPS_DIR=/app/calibration_baked/raw
 
 ENV PORT=8000
 EXPOSE 8000

@@ -6,6 +6,7 @@ TRIBE model is loaded once at startup and kept warm for the process lifetime.
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
 from contextlib import asynccontextmanager
@@ -25,7 +26,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-CALIBRATION_BUNDLE_PATH = Path("data/clip_library/calibration_bundle.npz")
+# Configurable via env so deployments can bake this into the image at a path
+# outside any mounted persistent disk — a disk mounted at the same path would
+# otherwise shadow/hide whatever the Dockerfile COPY'd in (see render.yaml).
+CALIBRATION_BUNDLE_PATH = Path(
+    os.environ.get("CALIBRATION_BUNDLE_PATH", "data/clip_library/calibration_bundle.npz")
+)
 
 job_manager = JobManager(CALIBRATION_BUNDLE_PATH)
 
