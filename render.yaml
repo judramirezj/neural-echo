@@ -13,7 +13,13 @@ services:
     name: neural-echo-api
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: standard  # needs enough RAM to hold TRIBE + CLAP warm (see FINDINGS.md peak_rss)
+    # Standard (2GB) OOM'd in practice running a real job — TRIBE (audio
+    # encoder) and CLAP both load and stay warm in this one process; measured
+    # locally at ~1.3GB RSS for TRIBE ALONE on just an 8s clip (see
+    # FINDINGS.md), before adding CLAP + torch/runtime overhead + real 45s
+    # audio. Pro (4GB) billed per-second — affordable for a short hackathon
+    # run; bump to pro-plus (8GB) if this still OOMs on a real job.
+    plan: pro
     healthCheckPath: /health
     envVars:
       - key: ELEVENLABS_API_KEY
