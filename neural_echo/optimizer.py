@@ -136,12 +136,13 @@ class OptimizerRun:
         self._init_db()
 
         self.reference_analysis = analysis.analyze_reference(reference_audio_path)
-        self.reference_delta = calibration._raw_delta_for_clip(
-            self.model, Path(reference_audio_path), bundle.baseline_mean
+        # Computed ONCE and reused for every candidate in every generation —
+        # see FINDINGS.md §8: the naive per-candidate helper recomputes the
+        # reference's TRIBE pass every time, doubling cost for nothing.
+        self.reference_profile = calibration.compute_profile_for_clip(
+            self.model, bundle, Path(reference_audio_path)
         )
-        self.reference_profile = calibration._profile_from_delta(
-            self.reference_delta, bundle.vertex_mask, bundle.network_labels
-        )
+        self.reference_clap_embedding = analysis.clap_audio_embedding(reference_audio_path)
 
         self.history: list[GenerationResult] = []
         self.learned_insights = ""
@@ -226,7 +227,10 @@ class OptimizerRun:
             return result
 
         # Hard filters first (brief §5) — never blended into D_brain.
-        novelty = analysis.novelty_check(audio_path, self.reference_audio_path, self.reference_analysis)
+        novelty = analysis.novelty_check(
+            audio_path, self.reference_audio_path, self.reference_analysis,
+            reference_embedding=self.reference_clap_embedding,
+        )
         result.novelty_audio_sim = novelty["audio_similarity"]
         result.is_near_cover = novelty["is_near_cover"]
         if novelty["is_near_cover"]:
@@ -240,9 +244,11 @@ class OptimizerRun:
             return result
 
         result.passed_constraint = True
-        dist, ref_profile, cand_profile = calibration.score_against_reference(
-            self.model, self.bundle, Path(self.reference_audio_path), Path(audio_path)
-        )
+        # reference_profile computed once in __init__ and reused here — see
+        # FINDINGS.md §8, this used to recompute the reference's TRIBE pass
+        # on every single candidate.
+        cand_profile = calibration.compute_profile_for_clip(self.model, self.bundle, Path(audio_path))
+        dist = calibration.score_candidate_against_profile(self.bundle, self.reference_profile, cand_profile)
         result.D_brain = dist.D_brain
         result.percentile = dist.percentile
         result.d_spatial = dist.d_spatial
@@ -253,7 +259,7 @@ class OptimizerRun:
         network_labels_masked = (
             self.bundle.network_labels[self.bundle.vertex_mask] if self.bundle.network_labels is not None else None
         )
-        result.per_network_deltas = metric_mod.per_network_deltas(cand_profile, ref_profile, network_labels_masked)
+        result.per_network_deltas = metric_mod.per_network_deltas(cand_profile, self.reference_profile, network_labels_masked)
         return result
 
     def _build_gen0_prompt(self) -> tuple[str, str]:

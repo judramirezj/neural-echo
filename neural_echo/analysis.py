@@ -135,14 +135,23 @@ def constraint_adherence(candidate_audio_path: str, constraint_text: str) -> flo
     return _cosine(audio_emb, text_emb)
 
 
-def novelty_check(candidate_audio_path: str, reference_audio_path: str, reference_analysis: dict) -> dict:
+def novelty_check(
+    candidate_audio_path: str,
+    reference_audio_path: str,
+    reference_analysis: dict,
+    reference_embedding: np.ndarray | None = None,
+) -> dict:
     """Hard novelty filter (brief §5): audio-audio CLAP similarity below a
     ceiling AND a minimum tempo delta vs. the reference. Either condition
     failing marks the candidate a near-cover — rejected outright, reported
     to the LLM as a signal, never blended into D_brain.
+
+    Pass reference_embedding (from a single upfront clap_audio_embedding
+    call) when checking many candidates against one fixed reference — e.g.
+    the optimizer loop — to avoid re-embedding the reference every call.
     """
     cand_emb = clap_audio_embedding(candidate_audio_path)
-    ref_emb = clap_audio_embedding(reference_audio_path)
+    ref_emb = reference_embedding if reference_embedding is not None else clap_audio_embedding(reference_audio_path)
     audio_sim = _cosine(cand_emb, ref_emb)
 
     y, sr = librosa.load(candidate_audio_path, sr=None, mono=True)

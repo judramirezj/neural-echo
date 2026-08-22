@@ -45,8 +45,13 @@ services:
     startCommand: npm start
     plan: starter
     envVars:
+      # NOTE: Render's fromService host/port/hostport properties give a
+      # service's PRIVATE network address (only reachable from other Render
+      # services) — useless here, since NEXT_PUBLIC_API_URL runs in the
+      # visitor's browser and is baked into the JS bundle at BUILD time.
+      # It must be the API's public HTTPS URL, which for a Render web
+      # service with no custom domain always follows this pattern:
+      # https://<service name>.onrender.com — hardcode it to match the
+      # `name:` of the api service above; update both together if renamed.
       - key: NEXT_PUBLIC_API_URL
-        fromService:
-          type: web
-          name: neural-echo-api
-          property: hostport
+        value: https://neural-echo-api.onrender.com

@@ -236,13 +236,37 @@ def score_against_reference(
     cand_clip_path: Path,
     weights: dict = metric.DEFAULT_WEIGHTS,
 ) -> tuple[metric.DistanceResult, metric.BrainProfile, metric.BrainProfile]:
-    """Convenience wrapper: score one candidate against one reference, fully
-    calibrated. Used by the optimizer for every genome in every generation.
+    """Convenience wrapper for one-off comparisons (tests, ad-hoc scripts):
+    scores one candidate against one reference, fully calibrated. Recomputes
+    the reference's TRIBE pass every call — for the optimizer loop, where the
+    same reference is scored against many candidates in a row, use
+    `score_candidate_against_profile` with a `compute_profile_for_clip`
+    result computed ONCE instead, or this doubles TRIBE cost per candidate
+    for no reason (see FINDINGS.md §8).
     """
-    ref_delta = _raw_delta_for_clip(model, ref_clip_path, bundle.baseline_mean)
-    cand_delta = _raw_delta_for_clip(model, cand_clip_path, bundle.baseline_mean)
-    ref_profile = _profile_from_delta(ref_delta, bundle.vertex_mask, bundle.network_labels)
-    cand_profile = _profile_from_delta(cand_delta, bundle.vertex_mask, bundle.network_labels)
+    ref_profile = compute_profile_for_clip(model, bundle, ref_clip_path)
+    cand_profile = compute_profile_for_clip(model, bundle, cand_clip_path)
     result = metric.distance(ref_profile, cand_profile, bundle.dynamics_mean, bundle.dynamics_std, weights)
     result = metric.calibrate(result, bundle.null_distribution, bundle.floor)
     return result, ref_profile, cand_profile
+
+
+def compute_profile_for_clip(model, bundle: CalibrationBundle, clip_path: Path) -> metric.BrainProfile:
+    """One TRIBE forward pass -> a calibrated BrainProfile for one clip.
+    Call once per clip and reuse the result — this is the expensive step."""
+    delta = _raw_delta_for_clip(model, clip_path, bundle.baseline_mean)
+    return _profile_from_delta(delta, bundle.vertex_mask, bundle.network_labels)
+
+
+def score_candidate_against_profile(
+    bundle: CalibrationBundle,
+    ref_profile: metric.BrainProfile,
+    cand_profile: metric.BrainProfile,
+    weights: dict = metric.DEFAULT_WEIGHTS,
+) -> metric.DistanceResult:
+    """Pure comparison of two already-computed profiles — no TRIBE call.
+    Use this in any loop that scores many candidates against one fixed
+    reference (e.g. the optimizer), with the reference profile computed once
+    via `compute_profile_for_clip`."""
+    result = metric.distance(ref_profile, cand_profile, bundle.dynamics_mean, bundle.dynamics_std, weights)
+    return metric.calibrate(result, bundle.null_distribution, bundle.floor)
