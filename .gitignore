@@ -15,3 +15,23 @@ cache/
 *.ckpt
 
 .DS_Store
+
+# neural echo generated/runtime data (large binaries, per-run artifacts)
+data/generated/
+data/jobs/
+data/clip_library/normalized/
+*.mp3
+*.wav
+*.tsv
+phase0_probe_result.json
+# NOTE: data/clip_library/calibration_bundle.npz and data/clip_library/raw/*.mp3
+# are intentionally kept (negated below) despite the blanket *.mp3/*.wav rules
+# above — the bundle is a few hundred KB, and raw/ (~10MB) is what powers
+# --dry-run/stub mode in production. Negations must come after the rule they override.
+!data/clip_library/raw/*.mp3
+
+# node / next.js
+apps/web/node_modules/
+apps/web/.next/
+apps/web/out/
+apps/web/.env.local

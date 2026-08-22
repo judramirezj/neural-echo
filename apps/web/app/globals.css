@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+/*
+ * Neural Echo — dark scientific-instrument theme.
+ * Palette values below are the validated dark-mode steps from the
+ * project's dataviz skill reference palette (see apps/web/README notes).
+ * Dark-only: this product is a live lab instrument, not a marketing site.
+ */
+:root {
+  color-scheme: dark;
+
+  /* chrome */
+  --surface-0: #0d0d0d; /* page plane */
+  --surface-1: #16161a; /* card surface */
+  --surface-2: #1a1a19; /* chart surface */
+  --border-hairline: rgba(255, 255, 255, 0.1);
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+
+  /* ink */
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+
+  /* accent (single accent color for the whole product) */
+  --accent: #3987e5; /* categorical slot 1 / sequential hue, dark step */
+  --accent-soft: rgba(57, 135, 229, 0.12);
+
+  /* second series (used only in the two-line convergence chart) */
+  --series-2: #d95926; /* categorical slot 2, dark step */
+
+  /* diverging pair, for the radar chart's signed deltas */
+  --diverging-pos: #3987e5;
+  --diverging-neg: #e66767;
+  --diverging-mid: #383835;
+
+  /* status */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #e66767;
+
+  --background: var(--surface-0);
+  --foreground: var(--text-primary);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

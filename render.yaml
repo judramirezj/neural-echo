@@ -1,0 +1,52 @@
+# Render blueprint for Neural Echo.
+#
+# IMPORTANT (see README "Honest caveats"): Render's standard plans are CPU-only.
+# TRIBE v2 was only validated on CPU on a 10-core Mac during development (see
+# FINDINGS.md) — each 45s candidate takes on the order of 10-20s to score, so a
+# 6-generation x 10-candidate run can take 15-25 minutes end to end. This is
+# workable for a live-progress demo (the UI streams every candidate as it's
+# scored) but is NOT the brief's assumed GPU deployment target. If you have
+# access to a Render GPU-enabled plan or an external GPU worker, point
+# TRIBE_DEVICE at it and re-measure before treating these numbers as final.
+services:
+  - type: web
+    name: neural-echo-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard  # needs enough RAM to hold TRIBE + CLAP warm (see FINDINGS.md peak_rss)
+    healthCheckPath: /health
+    envVars:
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HUGGING_FACE_TOKEN
+        sync: false
+      - key: UV_PYTHON
+        value: "3.11"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: HF_HOME
+        value: /app/data/hf_cache
+      - key: TRIBE_CACHE_DIR
+        value: /app/data/tribe_cache
+    disk:
+      name: neural-echo-data
+      mountPath: /app/data
+      sizeGB: 10  # generated candidates + job artifacts + HF/TRIBE model cache
+                  # (HF_HOME/TRIBE_CACHE_DIR point here so models survive restarts —
+                  # without this, ~2-3GB of models re-download on every deploy/restart)
+
+  - type: web
+    name: neural-echo-web
+    runtime: node
+    rootDir: apps/web
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    plan: starter
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: neural-echo-api
+          property: hostport

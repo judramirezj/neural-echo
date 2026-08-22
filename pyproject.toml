@@ -4,15 +4,40 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=1.0.0",
+    "colorcet>=3.2.1",
+    "elevenlabs>=2.64.0",
+    "fastapi>=0.141.1",
     "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.9",
     "jupyter>=1.1.1",
+    "librosa>=0.11.0",
     "matplotlib>=3.11.1",
     "moviepy>=2.2.1",
+    "nbconvert>=7.17.1",
+    "nilearn>=0.14.0",
+    "nltk>=3.10.3",
+    "opencv-python>=5.0.0.93",
     "pillow>=11.3.0",
+    "plotly>=6.9.0",
+    "pyloudnorm>=0.2.0",
     "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "pyvista>=0.48.4",
+    "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "torchaudio==2.6.0",
     "tribev2",
+    "uvicorn[standard]>=0.52.4",
+    "yt-dlp>=2026.8.19",
 ]
 
 [tool.uv.sources]
 tribev2 = { git = "https://github.com/facebookresearch/tribev2.git" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.4",
+]
