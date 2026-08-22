@@ -5,6 +5,7 @@ step 0): loudness and sample rate differences would otherwise dominate the
 brain-distance metric before any musical content does.
 """
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,8 +36,14 @@ def download_youtube_audio(url: str, out_dir: Path) -> Path:
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     out_template = str(out_dir / "%(id)s.%(ext)s")
+    # Invoke via `python -m yt_dlp` rather than the bare `yt-dlp` binary — a
+    # subprocess doesn't inherit the venv's bin/ on PATH just because the
+    # calling process is `.venv/bin/python`, so the bare command silently
+    # fails with FileNotFoundError in exactly this setup (reproduced both
+    # locally and on Render). sys.executable guarantees the same venv.
     cmd = [
-        "yt-dlp", "-x", "--audio-format", "wav",
+        sys.executable, "-m", "yt_dlp",
+        "-x", "--audio-format", "wav",
         "--audio-quality", "0",
         "-o", out_template,
         url,
