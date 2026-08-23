@@ -2,12 +2,14 @@
 
 ## 1. Publish the backend image
 
-From the repository root, use a Linux image matching the Runpod host:
+From the repository root, use a Linux image matching the Runpod host. Tag each
+release immutably as well as `latest` so Runpod never reuses an ambiguous tag:
 
 ```bash
 docker login
 docker buildx build \
   --platform linux/amd64 \
+  -t <dockerhub-user>/neural-echo-api:<git-commit> \
   -t <dockerhub-user>/neural-echo-api:latest \
   --push .
 ```
@@ -17,7 +19,8 @@ Docker health check at `/health`.
 
 ## 2. Start it on Runpod
 
-Create a GPU Pod from `<dockerhub-user>/neural-echo-api:latest` and configure:
+Create or edit the GPU Pod to use
+`<dockerhub-user>/neural-echo-api:<git-commit>` and configure:
 
 - Expose HTTP port `8000`.
 - Mount the persistent network volume at `/app/data`. TRIBE/Hugging Face model
@@ -25,9 +28,6 @@ Create a GPU Pod from `<dockerhub-user>/neural-echo-api:latest` and configure:
 - Set `ELEVENLABS_API_KEY` and `ANTHROPIC_API_KEY` as environment variables.
 - Set `FRONTEND_ORIGINS=https://<your-render-service>.onrender.com` so only
   the deployed browser client can call the API.
-- Optional: mount a Netscape-format YouTube cookie file and set
-  `YOUTUBE_COOKIES_PATH=/app/data/cookies.txt`. File upload remains the
-  reliable, ToS-clean input path.
 - Set `PORT=8000` if the template overrides the image default.
 - Use at least 30 GB of volume storage for model caches and generated jobs.
 
@@ -39,6 +39,9 @@ curl https://<pod-id>-8000.proxy.runpod.net/health
 
 The first boot is intentionally slower because the lifespan hook downloads and
 warms TRIBE before `/health` returns. Subsequent boots use `/app/data/cache`.
+If Docker reports `No such container`, the old Pod/container ID is stale: edit
+or restart the Pod from the Runpod dashboard and verify that its image field is
+the new immutable tag. Do not keep issuing Docker commands against the old ID.
 
 ## 3. Deploy the frontend on Render
 

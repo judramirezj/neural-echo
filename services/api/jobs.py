@@ -27,6 +27,22 @@ JOBS_DIR = Path("data/jobs")
 STUB_CLIPS_DIR = Path(os.environ.get("STUB_CLIPS_DIR", "data/clip_library/raw"))
 
 
+def _friendly_job_error(error: Exception) -> str:
+    """Turn infrastructure/provider failures into actionable user messages."""
+    message = str(error).lower()
+    if "no such container" in message:
+        return "The music engine restarted during this session. Please start a new run."
+    if "cuda" in message and ("memory" in message or "out of memory" in message):
+        return "The neural model ran out of GPU memory. Please retry; the engine has released its previous session."
+    if "bad_composition_plan" in message or "terms of service" in message:
+        return "The music plan could not be safely rendered. Try describing the creative direction without names or brands."
+    if "elevenlabs" in message or "internal_server_error" in message or "status_code: 5" in message:
+        return "The music generator is temporarily unavailable after several retries. Please try this session again."
+    if "anthropic" in message or "claude" in message:
+        return "The creative director is temporarily unavailable. Please try again in a moment."
+    return "This session couldn't complete. Please try again; your original upload is unchanged."
+
+
 def _iteration_to_dict(r: IterationResult) -> dict:
     return {
         "type": "iteration_complete",
@@ -129,4 +145,4 @@ class JobManager:
         except Exception as e:
             logger.exception("Job %s failed", job.id)
             job.status = "error"
-            job.error = str(e)
+            job.error = _friendly_job_error(e)

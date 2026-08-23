@@ -39,8 +39,8 @@ Notes:
 
 ## Neural Echo
 
-Paste a YouTube link (or upload a file) plus a creative constraint in plain
-language (e.g. "use natural forest sounds"), and Neural Echo runs a closed
+Upload a song plus a creative constraint in plain language (for example,
+"use natural forest sounds"), and Neural Echo runs a closed
 optimization loop: Claude Sonnet 5 proposes one ElevenLabs Music v2 composition
 plan → it is rendered to audio → it is scored by comparing its predicted
 brain response (via Meta's [TRIBE v2](https://huggingface.co/facebook/tribev2))
@@ -53,10 +53,8 @@ it evolve live and download the winner.
 non-commercial use only. Don't ship this as a commercial product without
 relicensing or swapping the brain-encoding model.
 
-**⚠️ YouTube ingestion is a ToS-grey-area demo affordance.** Downloading audio
-from YouTube (`yt-dlp`) violates YouTube's Terms of Service. The file-upload
-path is the ToS-clean primary route — YouTube URL support exists to make the
-demo frictionless, not as an endorsed production pattern.
+The final-user interface is upload-first. YouTube reference input is visibly
+marked as coming soon and cannot be selected.
 
 ### Architecture
 
@@ -123,8 +121,9 @@ cd apps/web && npm install && npm run dev  # starts the frontend at http://local
   one lineage with one fixed seed, so each successful plan is rendered and
   TRIBE-scored before Claude proposes the next one.
 - **The cortical-surface view is part of the live run and result screens.** It
-  animates the signed candidate-vs-reference residual across optimizer
-  iterations, using transparent per-vertex overlays on fsaverage.
+  places the reference and evolving candidate brains side by side on one
+  intensity scale, then animates the candidate across optimizer iterations
+  using transparent per-vertex overlays on fsaverage.
 
 Before Submitting:
 

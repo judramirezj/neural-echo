@@ -9,6 +9,8 @@ import { fmtNum } from "@/lib/format";
 import { WorstRegions } from "@/components/run/worst-regions";
 import { planSummary } from "@/components/run/plan-summary";
 import { BrainResponse } from "@/components/run/brain-response";
+import { ShareButton } from "@/components/run/share-button";
+import { OptimizationInsights } from "@/components/run/optimization-insights";
 
 export default function ResultPage() {
   const params = useParams<{ jobId: string }>();
@@ -96,21 +98,30 @@ export default function ResultPage() {
             <Metric label="Score" value={fmtNum(best.cost.global_score)} />
             <Metric label="From iteration" value={String(best.iteration_index)} />
           </div>
-          {best.audio_path && (
-            <a
-              href={artifactUrl(jobId, best.audio_path)}
-              download
-              className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
-            >
-              Download MP3
-            </a>
-          )}
+          <div className="flex gap-2">
+            <ShareButton />
+            {best.audio_path && (
+              <a
+                href={artifactUrl(jobId, best.audio_path)}
+                download
+                className="neural-button rounded-xl px-4 py-2 text-sm font-semibold text-white"
+              >
+                Download MP3
+              </a>
+            )}
+          </div>
         </div>
       </div>
 
       <p className="mb-8 rounded-md border border-white/10 bg-[var(--surface-1)] px-4 py-3 text-sm leading-relaxed text-[var(--text-secondary)]">
         {buildSummary(best.cost.global_score)}
       </p>
+
+      {(job.iterations ?? []).length > 0 && (
+        <div className="mb-8">
+          <OptimizationInsights iterations={job.iterations ?? []} />
+        </div>
+      )}
 
       <div className="mb-8">
         <BrainResponse jobId={jobId} iterationCount={result.n_iterations} />

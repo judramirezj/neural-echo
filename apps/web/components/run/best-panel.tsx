@@ -34,6 +34,15 @@ export function BestPanel({ jobId, best, domainMax }: BestPanelProps) {
           {best.audio_path && (
             <audio controls src={artifactUrl(jobId, best.audio_path)} className="mb-4 w-full" />
           )}
+          {best.audio_path && (
+            <a
+              href={artifactUrl(jobId, best.audio_path)}
+              download
+              className="mb-4 inline-flex rounded-lg border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-white transition hover:border-violet-300/35"
+            >
+              Download this version ↓
+            </a>
+          )}
           {best.cost && <ScoreMeter value={best.cost.global_score} domainMax={domainMax} bestSoFar={best.cost.global_score} />}
           <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
             <dt className="text-[var(--text-muted)]">Plan</dt>

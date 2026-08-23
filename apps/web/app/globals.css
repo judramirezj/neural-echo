@@ -10,21 +10,21 @@
   color-scheme: dark;
 
   /* chrome */
-  --surface-0: #0d0d0d; /* page plane */
-  --surface-1: #16161a; /* card surface */
-  --surface-2: #1a1a19; /* chart surface */
+  --surface-0: #080a11; /* page plane */
+  --surface-1: #111522; /* card surface */
+  --surface-2: #171c2b; /* chart surface */
   --border-hairline: rgba(255, 255, 255, 0.1);
   --gridline: #2c2c2a;
   --baseline: #383835;
 
   /* ink */
   --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #898781;
+  --text-secondary: #bbc2d4;
+  --text-muted: #737c92;
 
   /* accent (single accent color for the whole product) */
-  --accent: #3987e5; /* categorical slot 1 / sequential hue, dark step */
-  --accent-soft: rgba(57, 135, 229, 0.12);
+  --accent: #7c6df2;
+  --accent-soft: rgba(124, 109, 242, 0.14);
 
   /* second series (used only in the two-line convergence chart) */
   --series-2: #d95926; /* categorical slot 2, dark step */
@@ -56,9 +56,83 @@ html {
 }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(circle at 15% 0%, rgba(35, 143, 190, 0.12), transparent 32rem),
+    radial-gradient(circle at 90% 12%, rgba(109, 74, 190, 0.12), transparent 30rem),
+    var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+::selection {
+  background: rgba(103, 232, 249, 0.24);
+  color: #fff;
+}
+
+.neural-gradient-text {
+  background: linear-gradient(105deg, #8be9ff 4%, #a89bff 52%, #ff91c8 98%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.neural-button {
+  background: linear-gradient(105deg, #5b5eea 0%, #7759e8 50%, #b44ed7 100%);
+  box-shadow: 0 14px 45px rgba(106, 85, 232, 0.3), inset 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.neural-button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 55px rgba(106, 85, 232, 0.42), inset 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.neural-aurora {
+  background:
+    radial-gradient(ellipse at 11% 48%, rgba(52, 211, 235, 0.12), transparent 34%),
+    radial-gradient(ellipse at 78% 38%, rgba(121, 94, 230, 0.15), transparent 31%),
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+  background-size: auto, auto, 72px 72px, 72px 72px;
+  mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+}
+
+.neural-orbit {
+  border: 1px solid rgba(129, 140, 248, 0.08);
+  border-radius: 46% 54% 48% 52%;
+  animation: neural-orbit 24s linear infinite;
+}
+
+.neural-orbit::before,
+.neural-orbit::after {
+  content: "";
+  position: absolute;
+  inset: 13%;
+  border: 1px solid rgba(103, 232, 249, 0.08);
+  border-radius: 53% 47% 56% 44%;
+  transform: rotate(24deg);
+}
+
+.neural-orbit::after {
+  inset: 28%;
+  border-color: rgba(244, 114, 182, 0.08);
+  transform: rotate(-31deg);
+}
+
+.neural-node {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #8be9ff;
+  box-shadow: 0 0 18px #67e8f9;
+}
+
+.neural-node-a { left: 9%; top: 32%; }
+.neural-node-b { right: 15%; top: 14%; background: #a89bff; box-shadow: 0 0 18px #8b7cff; }
+.neural-node-c { bottom: 12%; right: 28%; background: #ff91c8; box-shadow: 0 0 18px #ff78bd; }
+
+@keyframes neural-orbit {
+  to { transform: rotate(360deg); }
 }
 
 .tabular-nums {
@@ -106,5 +180,5 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .brain-loader { animation: none; }
+  .brain-loader, .neural-orbit { animation: none; }
 }

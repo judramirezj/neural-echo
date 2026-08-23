@@ -19,6 +19,7 @@ import { ConvergenceChart, type ConvergencePoint } from "@/components/run/conver
 import { HypothesisLog } from "@/components/run/hypothesis-log";
 import { IterationCard } from "@/components/run/iteration-card";
 import { BrainResponse } from "@/components/run/brain-response";
+import { OptimizationInsights } from "@/components/run/optimization-insights";
 
 export default function RunPage() {
   const params = useParams<{ jobId: string }>();
@@ -32,13 +33,12 @@ export default function RunPage() {
   const [doneResult, setDoneResult] = useState<JobResult | null>(null);
   const [iterations, setIterations] = useState<IterationResult[]>([]);
   const [staleOnLoad, setStaleOnLoad] = useState(false);
+  const [connectionInterrupted, setConnectionInterrupted] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
 
-  // Resolve current job state first — a job's SSE queue does not replay
-  // history, so on a fresh page load (or refresh) we need GET /jobs/{id}
-  // to know if it already reached a terminal state before deciding whether
-  // to open the live stream at all.
+  // Resolve current state and iteration history first so refreshes can resume
+  // the complete optimization story before reconnecting to live updates.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -48,6 +48,7 @@ export default function RunPage() {
         setConstraintText(job.constraint_text);
         setStatus(job.status);
         setStreamError(job.error);
+        setIterations(job.iterations ?? []);
         if (job.result) setDoneResult(job.result);
         if (job.status === "done" || job.status === "error") {
           setStaleOnLoad(true);
@@ -70,6 +71,7 @@ export default function RunPage() {
 
     const es = new EventSource(jobStreamUrl(jobId));
     esRef.current = es;
+    es.onopen = () => setConnectionInterrupted(false);
 
     es.onmessage = (ev) => {
       try {
@@ -86,7 +88,10 @@ export default function RunPage() {
           case "iteration_complete": {
             const { type, ...iteration } = msg as IterationCompleteEvent;
             void type;
-            setIterations((prev) => [...prev, iteration]);
+            setIterations((prev) => [
+              ...prev.filter((item) => item.iteration_index !== iteration.iteration_index),
+              iteration,
+            ]);
             break;
           }
           case "done":
@@ -107,8 +112,7 @@ export default function RunPage() {
     };
 
     es.onerror = () => {
-      // EventSource retries automatically; if the job is already terminal
-      // this will just keep failing quietly, which is fine for a demo tool.
+      setConnectionInterrupted(true);
     };
 
     return () => {
@@ -159,31 +163,43 @@ export default function RunPage() {
   if (initialError) {
     return (
       <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-16">
-        <p className="rounded-md border border-[var(--status-critical)]/40 bg-[var(--status-critical)]/10 px-4 py-3 text-sm text-[var(--status-critical)]">
-          {initialError}
-        </p>
+        <div className="rounded-2xl border border-rose-300/25 bg-rose-300/10 p-5 text-sm text-rose-100">
+          <p className="font-semibold text-white">The music engine is reconnecting</p>
+          <p className="mt-1 text-[var(--text-secondary)]">RunPod may still be restarting the container. Your browser can safely try again.</p>
+          <div className="mt-4 flex gap-3">
+            <button onClick={() => window.location.reload()} className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-[#111522]">Retry connection</button>
+            <Link href="/" className="rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-white">Start a new session</Link>
+          </div>
+          <p className="mt-3 font-mono text-[10px] text-rose-200/60">{initialError}</p>
+        </div>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
-      <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
+    <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-10">
+      <header className="mb-8 flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-white/[0.08] bg-white/[0.025] px-5 py-4">
         <div>
           <p className="text-xs font-medium uppercase tracking-widest text-[var(--accent)]">
-            Neural Echo — run {jobId}
+            Neural Echo · Live session
           </p>
           <h1 className="mt-1 text-lg font-semibold text-white">
-            Constraint: <span className="font-normal text-[var(--text-secondary)]">{constraintText || "—"}</span>
+            Creating: <span className="font-normal text-[var(--text-secondary)]">{constraintText || "—"}</span>
           </h1>
         </div>
         <StatusBanner status={status} error={streamError} />
       </header>
 
+      {connectionInterrupted && status !== "done" && status !== "error" && (
+        <p className="mb-6 rounded-xl border border-amber-300/20 bg-amber-300/[0.08] px-4 py-3 text-xs text-amber-100">
+          The live connection paused. We&apos;re retrying automatically—the optimizer can continue in the background.
+        </p>
+      )}
+
       {status === "done" && (
         <Link
           href={`/run/${jobId}/result`}
-          className="mb-8 inline-block rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+          className="neural-button mb-8 inline-block rounded-xl px-5 py-2.5 text-sm font-semibold text-white"
         >
           View result →
         </Link>
@@ -191,9 +207,8 @@ export default function RunPage() {
 
       {staleOnLoad && iterations.length === 0 && (
         <p className="mb-8 rounded-md border border-white/10 bg-[var(--surface-1)] px-4 py-3 text-sm text-[var(--text-secondary)]">
-          This job already reached a terminal state before this page connected,
-          so per-iteration history isn&apos;t available to replay here (the
-          live event stream doesn&apos;t retain history across reconnects).
+          This session was created by an older engine version, so its detailed
+          iteration replay is unavailable.
           {status === "done" ? " See the final result below." : ""}
         </p>
       )}
@@ -201,6 +216,12 @@ export default function RunPage() {
       {bestOverall && (
         <div className="mb-10">
           <BestPanel jobId={jobId} best={bestOverall} domainMax={domainMax} />
+        </div>
+      )}
+
+      {iterations.length > 0 && (
+        <div className="mb-10">
+          <OptimizationInsights iterations={iterations} />
         </div>
       )}
 

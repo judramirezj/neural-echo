@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Neural Echo",
+  title: "Neural Echo — Music, remembered differently",
   description:
-    "A closed-loop optimizer that evolves music toward a listener's brain response.",
+    "Turn the feeling of a favorite song into original music shaped by its predicted brain response.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

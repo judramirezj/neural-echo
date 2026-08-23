@@ -66,18 +66,17 @@ export function BrainResponse({ jobId, iterationCount, isLive = false }: BrainRe
             </p>
           </div>
           <h2 className="text-xl font-semibold tracking-[-0.02em] text-white sm:text-2xl">
-            Where the candidate still differs
+            Watch the two responses move closer
           </h2>
           <p className="mt-2 max-w-xl text-xs leading-relaxed text-[#9298a9] sm:text-sm">
-            Each glow is a cortical mismatch against the reference. As the optimizer learns,
-            the residual signal should cool, soften, and disappear.
+            The left brain is your reference memory. The right brain is the generated song at
+            each iteration. Both use the same scale: matching shapes and brightness mean a closer response.
           </p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-5 rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-3 backdrop-blur">
-          <Legend color="bg-[#41cfff]" glow="shadow-[0_0_12px_#41cfff]" label="Candidate lower" />
-          <div className="h-7 w-px bg-white/10" />
-          <Legend color="bg-[#ff5b68]" glow="shadow-[0_0_12px_#ff5b68]" label="Candidate higher" />
+        <div className="flex shrink-0 items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-3 backdrop-blur">
+          <span className="h-2.5 w-16 rounded-full bg-gradient-to-r from-[#160b39] via-[#bb3754] to-[#fcffa4]" />
+          <span className="text-[10px] uppercase tracking-wider text-[#9ba2b5]">Brighter = stronger response</span>
         </div>
       </header>
 
@@ -99,6 +98,12 @@ export function BrainResponse({ jobId, iterationCount, isLive = false }: BrainRe
 
       </div>
 
+      <div className="relative z-10 border-t border-white/[0.08] bg-violet-300/[0.035] px-5 py-3 text-xs leading-relaxed text-[#aeb4c5] sm:px-7">
+        <span className="font-semibold text-white">How to read this:</span>{" "}
+        press play to watch the candidate evolve. The brains do not need to become visually identical—
+        the score below combines spatial distance with how each region changes over time.
+      </div>
+
       <footer className="relative z-10 grid border-t border-white/[0.08] bg-white/[0.018] sm:grid-cols-[1fr_auto]">
         <div className="grid grid-cols-3 divide-x divide-white/[0.08]">
           <Stat label="Frames mapped" value={visualization ? String(visualization.meta.frames.length).padStart(2, "0") : "—"} />
@@ -114,15 +119,6 @@ export function BrainResponse({ jobId, iterationCount, isLive = false }: BrainRe
         </div>
       </footer>
     </section>
-  );
-}
-
-function Legend({ color, glow, label }: { color: string; glow: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-[#9ba2b5]">
-      <span className={`h-2 w-2 rounded-full ${color} ${glow}`} />
-      {label}
-    </div>
   );
 }
 

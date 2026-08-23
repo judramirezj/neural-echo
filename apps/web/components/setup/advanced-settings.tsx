@@ -14,13 +14,13 @@ export function AdvancedSettings({
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="rounded-md border border-white/10 bg-[var(--surface-1)]">
+    <div className="rounded-xl border border-white/10 bg-black/15">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center justify-between px-4 py-3 text-sm text-[var(--text-secondary)]"
       >
-        <span>Advanced</span>
+        <span>Fine-tune the session</span>
         <span className="text-[var(--text-muted)]">{open ? "−" : "+"}</span>
       </button>
       {open && (

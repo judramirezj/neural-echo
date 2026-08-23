@@ -73,6 +73,7 @@ export interface JobStatusDict {
 
 export interface JobDetail extends JobStatusDict {
   result: JobResult | null;
+  iterations: IterationResult[];
 }
 
 export interface BrainFrameSummary {
@@ -95,6 +96,7 @@ export interface BrainVisualizationResponse {
     frames: BrainFrameSummary[];
     threshold: number;
     scale_max: number;
+    activity_scale_max: number;
     latest_iteration: number;
   };
 }

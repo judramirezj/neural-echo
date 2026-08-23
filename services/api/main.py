@@ -115,7 +115,11 @@ def get_job(job_id: str):
     job = job_manager.jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    return {**job.to_status_dict(), "result": job.result}
+    return {
+        **job.to_status_dict(),
+        "result": job.result,
+        "iterations": [_iteration_to_dict(iteration) for iteration in job.iterations],
+    }
 
 
 @app.get("/jobs/{job_id}/stream")
@@ -180,11 +184,18 @@ def get_brain_response(job_id: str, request: Request):
     job = job_manager.jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    scored = [r for r in job.iterations if r.brain_residual is not None]
+    scored = [
+        r for r in job.iterations
+        if r.brain_residual is not None
+        and r.brain_reference_activity is not None
+        and r.brain_candidate_activity is not None
+    ]
     if not scored:
         raise HTTPException(404, "No scored brain-response iterations yet")
 
     figure, meta = build_brain_response_figure(
+        scored[0].brain_reference_activity,
+        [r.brain_candidate_activity for r in scored],
         [r.brain_residual for r in scored],
         [r.iteration_index for r in scored],
     )

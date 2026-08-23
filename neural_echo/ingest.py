@@ -89,7 +89,28 @@ def normalize_clip(
     audio should be read — every downstream consumer (TRIBE and librosa)
     reads the output of this function so they all see identical stimuli.
     """
-    info = sf.info(str(src_path))
+    decode_path = src_path
+    try:
+        info = sf.info(str(decode_path))
+    except RuntimeError:
+        # libsndfile does not support every browser-friendly container (most
+        # notably many M4A/MP4/video uploads). ffmpeg is image-baked and gives
+        # the rest of the pipeline one deterministic PCM source.
+        decode_path = out_path.with_name(f"{out_path.stem}_decoded.wav")
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(src_path), "-vn",
+                "-ac", "2", "-ar", str(TARGET_SR), str(decode_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "We couldn't read that media file. Try MP3, WAV, M4A, FLAC, or MP4."
+            ) from None
+        info = sf.info(str(decode_path))
     source_duration_s = info.duration
 
     if start_s is None:
@@ -99,7 +120,7 @@ def normalize_clip(
         start_s = 0.0
         actual_window_s = min(window_s, source_duration_s)
 
-    audio, sr = sf.read(str(src_path), dtype="float32", always_2d=False)
+    audio, sr = sf.read(str(decode_path), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)  # downmix to mono
 
