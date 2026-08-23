@@ -89,6 +89,10 @@ export default function ResultPage() {
       </p>
       <h1 className="mb-6 text-2xl font-semibold text-white">Winning candidate</h1>
 
+      <div className="mb-8">
+        <BrainResponse jobId={jobId} iterationCount={result.n_iterations} />
+      </div>
+
       <div className="mb-6 rounded-lg border border-[var(--accent)]/50 bg-[var(--surface-1)] p-5">
         {best.audio_path && (
           <audio controls src={artifactUrl(jobId, best.audio_path)} className="mb-4 w-full" />
@@ -122,10 +126,6 @@ export default function ResultPage() {
           <OptimizationInsights iterations={job.iterations ?? []} />
         </div>
       )}
-
-      <div className="mb-8">
-        <BrainResponse jobId={jobId} iterationCount={result.n_iterations} />
-      </div>
 
       <section className="mb-8 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">
         <h2 className="mb-3 text-sm font-semibold text-white">Region diagnostics</h2>
