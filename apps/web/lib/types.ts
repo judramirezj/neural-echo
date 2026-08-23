@@ -5,9 +5,7 @@ export interface Chunk {
   duration_ms: number;
   positive_styles: string[];
   negative_styles: string[];
-  // Backend (neural_echo/generator.py) defines this as a free-form string
-  // (e.g. "high"), not a float as an earlier draft of the API contract
-  // suggested. Rendered as text, not a numeric bar.
+  // Daniel's ElevenLabs contract allows low, medium, or high.
   context_adherence: string;
 }
 
@@ -44,12 +42,6 @@ export interface CostResult {
   laterality: Record<string, number>;
 }
 
-export type RejectedReason =
-  | "generation_failed"
-  | "near_cover"
-  | "constraint_not_met"
-  | null;
-
 export interface IterationResult {
   iteration_index: number;
   reasoning: string;
@@ -60,10 +52,6 @@ export interface IterationResult {
   is_best: boolean;
   elapsed_s: number;
   cost: CostResult | null;
-  rejected_reason: RejectedReason;
-  adherence: number | null;
-  novelty_audio_sim: number | null;
-  is_near_cover: boolean | null;
 }
 
 export type JobStatusValue = "pending" | "preparing" | "running" | "done" | "error";

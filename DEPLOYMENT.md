@@ -23,6 +23,11 @@ Create a GPU Pod from `<dockerhub-user>/neural-echo-api:latest` and configure:
 - Mount the persistent network volume at `/app/data`. TRIBE/Hugging Face model
   caches, job databases, uploaded references, and generated audio persist here.
 - Set `ELEVENLABS_API_KEY` and `ANTHROPIC_API_KEY` as environment variables.
+- Set `FRONTEND_ORIGINS=https://<your-render-service>.onrender.com` so only
+  the deployed browser client can call the API.
+- Optional: mount a Netscape-format YouTube cookie file and set
+  `YOUTUBE_COOKIES_PATH=/app/data/cookies.txt`. File upload remains the
+  reliable, ToS-clean input path.
 - Set `PORT=8000` if the template overrides the image default.
 - Use at least 30 GB of volume storage for model caches and generated jobs.
 
@@ -41,6 +46,10 @@ warms TRIBE before `/health` returns. Subsequent boots use `/app/data/cache`.
 `NEXT_PUBLIC_API_URL` to the Runpod proxy URL without a trailing slash, then
 trigger a full Render deploy. This value is compiled into the browser bundle;
 changing it requires a rebuild, not only a service restart.
+
+The backend calls Claude Sonnet 5 directly (`claude-sonnet-5`). It has no
+Gemini dependency or Gemini API key. Never bake API keys or cookie files into
+the Docker image; configure them as Runpod secrets/environment variables.
 
 The Plotly renderer is client-only and lazy-loaded, so Render never attempts to
 access WebGL during SSR. Browser requests go directly to Runpod; the FastAPI

@@ -5,15 +5,11 @@ import { useState } from "react";
 interface AdvancedSettingsProps {
   maxIterations: number;
   onMaxIterationsChange: (v: number) => void;
-  adherenceTau: number;
-  onAdherenceTauChange: (v: number) => void;
 }
 
 export function AdvancedSettings({
   maxIterations,
   onMaxIterationsChange,
-  adherenceTau,
-  onAdherenceTauChange,
 }: AdvancedSettingsProps) {
   const [open, setOpen] = useState(false);
 
@@ -37,17 +33,9 @@ export function AdvancedSettings({
             max={20}
             onChange={onMaxIterationsChange}
           />
-          <Field
-            label="Adherence threshold (τ)"
-            hint="Minimum constraint-adherence score a candidate must clear to be scored"
-            value={adherenceTau}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={onAdherenceTauChange}
-          />
           <p className="text-xs text-[var(--text-muted)]">
-            Budget: up to {maxIterations} renders total (one candidate per iteration).
+            Up to {maxIterations} scored renders. The run stops early at a raw score below 0.15 or
+            after six rounds without improvement.
           </p>
         </div>
       )}

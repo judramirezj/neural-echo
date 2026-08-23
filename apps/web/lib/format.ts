@@ -19,7 +19,7 @@ export function fmtSeconds(v: number | null | undefined, digits = 1): string {
   return `${v.toFixed(digits)}s`;
 }
 
-/** Lowest global_score among iterations seen so far (cost=null iterations were rejected/unscored). */
+/** Lowest raw brain-response score among iterations seen so far. */
 export function bestByScore<T extends { cost: { global_score: number } | null }>(
   iterations: T[]
 ): T | null {

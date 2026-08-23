@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,9 +29,9 @@ MAX_TOTAL_S = 600
 class Chunk(BaseModel):
     text: str = Field(..., description='Section label, e.g. "[Intro]", "[Drop]"')
     duration_ms: int = Field(..., ge=MIN_CHUNK_S * 1000, le=MAX_CHUNK_S * 1000)
-    positive_styles: list[str] = Field(..., min_length=1, max_length=12)
-    negative_styles: list[str] = Field(default_factory=list, max_length=12)
-    context_adherence: str = Field(default="high")
+    positive_styles: list[str] = Field(..., min_length=1, max_length=50)
+    negative_styles: list[str] = Field(default_factory=list, max_length=50)
+    context_adherence: Literal["low", "medium", "high"] = Field(default="high")
 
     def to_api_dict(self) -> dict:
         return {
@@ -77,6 +78,10 @@ def repair_genome(raw: dict) -> Genome | None:
         chunks = raw.get("chunks", [])
         if not chunks:
             return None
+        for chunk in chunks:
+            # Older prompts allowed xhigh; Daniel's updated contract does not.
+            if chunk.get("context_adherence") == "xhigh":
+                chunk["context_adherence"] = "high"
         total_ms = sum(c.get("duration_ms", 0) for c in chunks)
         if total_ms > MAX_TOTAL_S * 1000:
             scale = (MAX_TOTAL_S * 1000) / total_ms
@@ -99,8 +104,8 @@ class GenerationResult(BaseModel):
 
 
 class ElevenLabsGenerator:
-    """Async batch generator with a semaphore (brief §4 throughput) and a
-    --dry-run stub mode that returns pre-rendered clips at zero API cost, so
+    """Async Music v2 generator with a --dry-run stub mode that returns
+    pre-rendered clips at zero API cost, so
     the optimizer loop and UI can be developed/tested without spending
     ElevenLabs credits on every iteration.
     """
@@ -148,42 +153,24 @@ class ElevenLabsGenerator:
             return GenerationResult(genome=genome, audio_path=str(out_path), dry_run=True)
 
         async with self._semaphore:
-            max_attempts = 5
-            for attempt in range(max_attempts):
-                try:
-                    compose_kwargs = {
-                        "composition_plan": genome.to_composition_plan(),
-                        "model_id": "music_v2",
-                        "respect_sections_durations": True,
-                    }
-                    if seed is not None:
-                        compose_kwargs["seed"] = seed
-                    chunks = []
-                    async for b in self._client.music.compose(**compose_kwargs):
-                        chunks.append(b)
-                    out_path.write_bytes(b"".join(chunks))
-                    return GenerationResult(genome=genome, audio_path=str(out_path), dry_run=False)
-                except Exception as e:
-                    msg = str(e)
-                    is_rate_limit = "429" in msg or "concurrent_limit_exceeded" in msg
-                    is_transient = (
-                        "status_code: 5" in msg or "internal_server_error" in msg
-                        or "timeout" in msg.lower() or "connection" in msg.lower()
-                    )
-                    if (is_rate_limit or is_transient) and attempt < max_attempts - 1:
-                        delay = 2.0 * (2 ** attempt)
-                        logger.warning(
-                            "Transient error generating genome %s, retrying in %.1fs (attempt %d/%d): %s",
-                            cache_key, delay, attempt + 1, max_attempts, msg,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    # Non-transient (e.g. ToS/copyright rejection): return the error
-                    # immediately without exhausting the retry budget — the caller
-                    # (the optimizer) is responsible for asking the LLM to revise
-                    # content-policy violations, which retrying alone can't fix.
-                    logger.error("ElevenLabs generation failed for genome %s: %s", cache_key, e)
-                    return GenerationResult(genome=genome, audio_path="", dry_run=False, error=msg)
+            try:
+                compose_kwargs = {
+                    "composition_plan": genome.to_composition_plan(),
+                    "model_id": "music_v2",
+                }
+                if seed is not None:
+                    compose_kwargs["seed"] = seed
+                chunks = []
+                async for b in self._client.music.compose(**compose_kwargs):
+                    chunks.append(b)
+                out_path.write_bytes(b"".join(chunks))
+                return GenerationResult(genome=genome, audio_path=str(out_path), dry_run=False)
+            except Exception as e:
+                # Daniel's optimizer owns the shared six-attempt budget and
+                # decides whether to retry, simplify, or reformulate.
+                msg = str(e)
+                logger.error("ElevenLabs generation failed for genome %s: %s", cache_key, e)
+                return GenerationResult(genome=genome, audio_path="", dry_run=False, error=msg)
 
     async def generate_batch(self, genomes: list[Genome]) -> list[GenerationResult]:
         return await asyncio.gather(*(self.generate_one(g) for g in genomes))

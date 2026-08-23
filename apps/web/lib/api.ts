@@ -8,7 +8,6 @@ export interface CreateJobParams {
   youtubeUrl?: string;
   file?: File;
   maxIterations: number;
-  adherenceTau?: number;
   dryRun?: boolean;
 }
 
@@ -19,9 +18,6 @@ export async function createJob(params: CreateJobParams): Promise<{ job_id: stri
   if (params.file) form.set("file", params.file);
   form.set("dry_run", String(params.dryRun ?? false));
   form.set("max_iterations", String(params.maxIterations));
-  if (params.adherenceTau !== undefined) {
-    form.set("adherence_tau", String(params.adherenceTau));
-  }
 
   const res = await fetch(`${API_URL}/jobs`, {
     method: "POST",

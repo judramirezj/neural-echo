@@ -38,7 +38,7 @@ ENV TRIBE_CACHE_DIR=/app/data/cache/tribe
 ENV PORT=8000
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=8s --start-period=180s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=8s --start-period=600s --retries=3 \
     CMD curl --fail --silent "http://127.0.0.1:${PORT}/health" > /dev/null || exit 1
 
 # Shell wrapper expands Runpod's optional PORT override; exec preserves signals.

@@ -41,12 +41,12 @@ Notes:
 
 Paste a YouTube link (or upload a file) plus a creative constraint in plain
 language (e.g. "use natural forest sounds"), and Neural Echo runs a closed
-optimization loop: an LLM proposes a batch of ElevenLabs Music v2 composition
-plans → each is rendered to audio → each is scored by comparing its predicted
+optimization loop: Claude Sonnet 5 proposes one ElevenLabs Music v2 composition
+plan → it is rendered to audio → it is scored by comparing its predicted
 brain response (via Meta's [TRIBE v2](https://huggingface.co/facebook/tribev2))
 against the reference's → the scores and per-brain-network diagnostics go back
-to the LLM, which writes a hypothesis and proposes the next batch → repeats
-until convergence, a generation cap, or the theoretical noise floor. You watch
+to Claude, which writes a hypothesis and proposes the next plan → repeats
+until convergence, a generation cap, or the patience limit. You watch
 it evolve live and download the winner.
 
 **⚠️ License: research demo only.** TRIBE v2 is licensed **CC-BY-NC-4.0** —
@@ -62,11 +62,11 @@ demo frictionless, not as an endorsed production pattern.
 
 ```
 neural_echo/       compat.py    TRIBE compatibility shims (see FINDINGS.md)
-                    ingest.py    YouTube/upload -> normalized 45s clip
+                    ingest.py    YouTube/upload -> normalized 90s benchmark clip
                     metric.py    the brain-cost function (region x time-window, pure functions)
                     atlases.py   fsaverage5 Destrieux -> anatomical lobule regions
                     generator.py Genome schema + ElevenLabs async client
-                    analysis.py  librosa reference analysis + CLAP scoring
+                    analysis.py  measured librosa features for Claude's initial plan
                     optimizer.py the single-lineage LangGraph optimization loop
 services/api/       FastAPI app: job submission, SSE progress stream, artifacts
 apps/web/           Next.js frontend (3 screens: setup, evolution, result)
@@ -76,9 +76,9 @@ tests/               validation gate (tests/test_metric_sanity.py)
 
 The brief specifies a separate `api`/`worker` split; this implementation
 combines them into one process (the FastAPI app loads TRIBE once at startup
-and keeps it warm) — simpler to deploy as a single Render web service. Split
-them back out if you need independent horizontal scaling of the GPU-bound
-scoring path from the request-handling path.
+and keeps it warm) — simpler to deploy as one Runpod GPU service. Split them
+back out if you need independent horizontal scaling of the GPU-bound scoring
+path from the request-handling path.
 
 ### Running locally
 
@@ -100,9 +100,10 @@ cd apps/web && npm install && npm run dev  # starts the frontend at http://local
   CUDA GPU). The brief assumes a GPU deployment target and asks for peak VRAM
   with/without the video modality — that could not be measured here at all;
   the FINDINGS.md numbers report CPU RAM as a rough proxy instead. On this
-  hardware, scoring one 45s candidate takes on the order of 10-20s CPU-bound
-  once TRIBE is warm — a 6-generation × 10-candidate run can take 15-25
-  minutes end to end. Re-measure on real GPU hardware before trusting these
+  hardware, scoring one 45s candidate took on the order of 10-20s CPU-bound;
+  the Daniel-compatible 90s benchmark now used in production takes longer
+  once TRIBE is warm. Re-measure the complete single-lineage loop on the
+  target Runpod GPU before trusting these
   numbers for production sizing.
 - **TRIBE v2's video modality is confirmed to never load for audio-only
   input** — verified both empirically (the extractor's underlying model
@@ -118,13 +119,12 @@ cd apps/web && npm install && npm run dev  # starts the frontend at http://local
   distribution is computed or needed. `data/clip_library/` is kept around only
   as a diverse reference set for `tests/test_metric_sanity.py` and
   `scripts/smoke_test.py`, not as a calibration input.
-- **ElevenLabs generation is capped at 2 concurrent requests** on this
-  account's tier — `generator.py`'s `ElevenLabsGenerator` defaults its
-  semaphore to 2, not the "fire all N concurrently" the brief describes for a
-  higher tier; raise `max_concurrency` if your account allows more.
-- **The nilearn cortical-surface secondary view (Screen 2) was deliberately
-  not built** — the brief marks it optional ("build [the radar chart] first")
-  and it needs a backend endpoint that doesn't exist yet.
+- **ElevenLabs generation is deliberately serial.** Daniel's optimizer follows
+  one lineage with one fixed seed, so each successful plan is rendered and
+  TRIBE-scored before Claude proposes the next one.
+- **The cortical-surface view is part of the live run and result screens.** It
+  animates the signed candidate-vs-reference residual across optimizer
+  iterations, using transparent per-vertex overlays on fsaverage.
 
 Before Submitting:
 

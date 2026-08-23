@@ -44,9 +44,9 @@ def main():
 
     def on_iteration(r: IterationResult):
         logger.info(
-            "[smoke] iteration %d: reasoning=%r global_score=%s rejected=%s",
+            "[smoke] iteration %d: reasoning=%r global_score=%s",
             r.iteration_index, r.reasoning[:200],
-            f"{r.cost.global_score:.4f}" if r.cost else None, r.rejected_reason,
+            f"{r.cost.global_score:.4f}" if r.cost else None,
         )
 
     run = OptimizerRun(

@@ -7,8 +7,10 @@ import asyncio
 import gzip
 import json
 import logging
+import os
 import shutil
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -39,9 +41,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Neural Echo API", lifespan=lifespan)
+frontend_origins = [
+    origin.strip()
+    for origin in os.environ.get("FRONTEND_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten to the deployed frontend origin in production
+    allow_origins=frontend_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -63,8 +70,14 @@ async def create_job(
     file: UploadFile | None = File(None),
     dry_run: bool = Form(False),
     max_iterations: int = Form(10),
-    adherence_tau: float = Form(0.15),
 ):
+    constraint_text = constraint_text.strip()
+    if not constraint_text:
+        raise HTTPException(400, "constraint_text cannot be empty")
+    if len(constraint_text) > 2_000:
+        raise HTTPException(400, "constraint_text must be 2000 characters or fewer")
+    if not 1 <= max_iterations <= 20:
+        raise HTTPException(400, "max_iterations must be between 1 and 20")
     if not youtube_url and not file:
         raise HTTPException(400, "Provide either youtube_url or file")
     if youtube_url and file:
@@ -74,7 +87,8 @@ async def create_job(
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     if file:
-        reference_path = tmp_dir / file.filename
+        safe_name = Path(file.filename or "reference-audio").name
+        reference_path = tmp_dir / f"{uuid.uuid4().hex[:12]}-{safe_name}"
 
         def _write_upload():
             with open(reference_path, "wb") as f:
@@ -92,7 +106,6 @@ async def create_job(
         constraint_text=constraint_text,
         dry_run=dry_run,
         max_iterations=max_iterations,
-        adherence_tau=adherence_tau,
     )
     return {"job_id": job.id}
 

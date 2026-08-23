@@ -3,7 +3,7 @@ import { artifactUrl } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { ScoreMeter } from "./score-meter";
 import { WorstRegions } from "./worst-regions";
-import { planSummary } from "./plan-summary";
+import { planStats, planSummary } from "./plan-summary";
 
 interface BestPanelProps {
   jobId: string;
@@ -12,6 +12,7 @@ interface BestPanelProps {
 }
 
 export function BestPanel({ jobId, best, domainMax }: BestPanelProps) {
+  const stats = planStats(best.plan);
   return (
     <div className="rounded-lg border border-[var(--accent)]/50 bg-[var(--surface-1)] p-5">
       <div className="mb-4 flex items-center justify-between">
@@ -37,11 +38,9 @@ export function BestPanel({ jobId, best, domainMax }: BestPanelProps) {
           <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
             <dt className="text-[var(--text-muted)]">Plan</dt>
             <dd className="text-right text-[var(--text-secondary)]">{planSummary(best.plan)}</dd>
-            <dt className="text-[var(--text-muted)]">Adherence</dt>
-            <dd className="text-right text-[var(--text-secondary)]">{fmtNum(best.adherence, 2)}</dd>
-            <dt className="text-[var(--text-muted)]">Novelty sim</dt>
+            <dt className="text-[var(--text-muted)]">Prompt complexity</dt>
             <dd className="text-right text-[var(--text-secondary)]">
-              {fmtNum(best.novelty_audio_sim, 2)}
+              {stats.positiveStyles + stats.negativeStyles} style cues
             </dd>
           </dl>
         </div>

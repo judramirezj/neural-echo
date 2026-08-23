@@ -15,7 +15,6 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [constraintText, setConstraintText] = useState("");
   const [maxIterations, setMaxIterations] = useState(10);
-  const [adherenceTau, setAdherenceTau] = useState(0.15);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,7 +32,6 @@ export default function Home() {
         youtubeUrl: mode === "youtube" ? youtubeUrl.trim() : undefined,
         file: mode === "file" ? file ?? undefined : undefined,
         maxIterations,
-        adherenceTau,
       });
       router.push(`/run/${job_id}`);
     } catch (err) {
@@ -43,7 +41,7 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center px-6 py-16">
+    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center px-6 py-16">
       <div className="mb-10">
         <p className="mb-2 text-xs font-medium uppercase tracking-widest text-[var(--accent)]">
           Neural Echo
@@ -56,6 +54,37 @@ export default function Home() {
           optimizer will propose, render, and score candidates against a
           brain-encoding model until it converges.
         </p>
+      </div>
+
+      <div className="mb-8 overflow-hidden rounded-xl border border-white/10 bg-[var(--surface-1)]">
+        <div className="border-b border-white/10 px-4 py-3">
+          <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
+            Daniel&apos;s optimization loop
+          </p>
+        </div>
+        <div className="grid sm:grid-cols-3">
+          <LoopStep
+            index="01"
+            eyebrow="Direct"
+            title="Claude Sonnet 5"
+            detail="Writes one precise Music v2 plan while preserving your creative constraint."
+          />
+          <LoopStep
+            index="02"
+            eyebrow="Render"
+            title="ElevenLabs"
+            detail="Generates the candidate with a fixed seed so prompt changes stay measurable."
+          />
+          <LoopStep
+            index="03"
+            eyebrow="Measure"
+            title="TRIBE v2"
+            detail="Scores the raw region-by-time brain response and sends every mismatch back."
+          />
+        </div>
+        <div className="border-t border-white/10 bg-[var(--accent)]/5 px-4 py-2.5 text-xs text-[var(--text-secondary)]">
+          Every successful render is scored. No taste proxy, novelty gate, or hidden calibration.
+        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
@@ -79,8 +108,6 @@ export default function Home() {
         <AdvancedSettings
           maxIterations={maxIterations}
           onMaxIterationsChange={setMaxIterations}
-          adherenceTau={adherenceTau}
-          onAdherenceTauChange={setAdherenceTau}
         />
 
         {error && (
@@ -98,5 +125,26 @@ export default function Home() {
         </button>
       </form>
     </main>
+  );
+}
+
+function LoopStep({
+  index,
+  eyebrow,
+  title,
+  detail,
+}: {
+  index: string;
+  eyebrow: string;
+  title: string;
+  detail: string;
+}) {
+  return (
+    <div className="relative border-b border-white/10 p-4 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0">
+      <span className="absolute right-3 top-3 font-mono text-[10px] text-[var(--accent)]/70">{index}</span>
+      <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">{eyebrow}</p>
+      <p className="mt-1 text-sm font-medium text-white">{title}</p>
+      <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">{detail}</p>
+    </div>
   );
 }

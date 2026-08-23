@@ -1,6 +1,6 @@
 """In-process job manager: runs each optimization as a background thread with
 its own event loop. Combines the brief's separate api/worker services into one
-process for a single Render web service — see README for the tradeoff.
+process for a single Runpod GPU service — see README for the tradeoff.
 
 Progress is exposed via `job.status` and `job.iterations` (an append-only
 list), which services/api/main.py's SSE endpoint polls by index — not a
@@ -45,10 +45,6 @@ def _iteration_to_dict(r: IterationResult) -> dict:
             "worst_cell": vars(r.cost.worst_cell),
             "laterality": r.cost.laterality,
         } if r.cost else None,
-        "rejected_reason": r.rejected_reason,
-        "adherence": r.adherence,
-        "novelty_audio_sim": r.novelty_audio_sim,
-        "is_near_cover": r.is_near_cover,
     }
 
 
@@ -82,7 +78,6 @@ class JobManager:
         constraint_text: str,
         dry_run: bool = False,
         max_iterations: int = 10,
-        adherence_tau: float = 0.15,
     ) -> Job:
         job_id = uuid.uuid4().hex[:12]
         job_dir = JOBS_DIR / job_id
@@ -92,14 +87,14 @@ class JobManager:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job, reference_path, constraint_text, dry_run, max_iterations, adherence_tau),
+            args=(job, reference_path, constraint_text, dry_run, max_iterations),
             daemon=True,
         )
         thread.start()
         return job
 
     def _run_job(self, job: Job, reference_path: Path, constraint_text: str, dry_run: bool,
-                 max_iterations: int, adherence_tau: float):
+                 max_iterations: int):
         try:
             job.status = "preparing"
 
@@ -116,7 +111,6 @@ class JobManager:
                 dry_run=dry_run,
                 stub_clips_dir=STUB_CLIPS_DIR if dry_run else None,
                 max_iterations=max_iterations,
-                adherence_tau=adherence_tau,
                 on_iteration=on_iteration,
             )
 

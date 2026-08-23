@@ -20,7 +20,7 @@ export function ScoreMeter({ value, domainMax, bestSoFar }: ScoreMeterProps) {
   return (
     <div>
       <div className="mb-1 flex items-baseline justify-between">
-        <span className="text-xs text-[var(--text-muted)]">score</span>
+        <span className="text-xs text-[var(--text-muted)]">raw brain distance · lower is better</span>
         <span className="tabular-nums text-sm font-medium text-white">
           {value === null ? "—" : fmtNum(value)}
         </span>

@@ -6,6 +6,7 @@ everything is monkeypatched or set via environment variables at import/load time
 so it stays reproducible across machines and easy to remove once upstream fixes
 ship. Import `get_tribe_model()` to get a working, CPU-safe, warm model instance.
 """
+import gc
 import os
 import threading
 
@@ -105,3 +106,17 @@ def get_tribe_model(cache_folder: str | None = None):
 def has_cuda() -> bool:
     import torch
     return torch.cuda.is_available()
+
+
+def release_inference_memory():
+    """Release intermediate TRIBE tensors while keeping the warm model loaded.
+
+    Daniel's optimizer does this after every prediction to prevent gradual VRAM
+    fragmentation and OOMs during long single-lineage runs.
+    """
+    gc.collect()
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()

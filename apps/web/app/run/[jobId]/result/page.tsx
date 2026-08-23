@@ -73,8 +73,8 @@ export default function ResultPage() {
     return (
       <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-16">
         <p className="text-sm text-[var(--text-secondary)]">
-          This job finished without producing a scored candidate — every
-          candidate across all iterations was rejected before scoring.
+          This job finished before a candidate could be rendered and scored.
+          Check the run log for the generation error.
         </p>
       </main>
     );
@@ -94,8 +94,6 @@ export default function ResultPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-6 text-sm">
             <Metric label="Score" value={fmtNum(best.cost.global_score)} />
-            <Metric label="Adherence" value={fmtNum(best.adherence, 2)} />
-            <Metric label="Novelty sim" value={fmtNum(best.novelty_audio_sim, 2)} />
             <Metric label="From iteration" value={String(best.iteration_index)} />
           </div>
           {best.audio_path && (

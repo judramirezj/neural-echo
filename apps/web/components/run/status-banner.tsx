@@ -7,8 +7,8 @@ interface StatusBannerProps {
 
 const LABELS: Record<JobStatusValue, string> = {
   pending: "Queued…",
-  preparing: "Preparing reference track…",
-  running: "Running optimizer…",
+  preparing: "Analyzing the 90-second reference…",
+  running: "Claude → ElevenLabs → TRIBE loop is live…",
   done: "Converged.",
   error: "Job failed.",
 };
