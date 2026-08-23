@@ -4,6 +4,7 @@ Combines the brief's api+worker split into one process (see README) — the
 TRIBE model is loaded once at startup and kept warm for the process lifetime.
 """
 import asyncio
+import gzip
 import json
 import logging
 import shutil
@@ -14,11 +15,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from neural_echo import compat, ingest
+from neural_echo.brain_visualization import build_brain_response_figure
 from services.api.jobs import JOBS_DIR, JobManager, _iteration_to_dict
 
 load_dotenv()
@@ -157,3 +159,30 @@ def get_artifact(job_id: str, filename: str):
     if job_local_path.exists():
         return FileResponse(job_local_path, media_type="audio/wav")
     raise HTTPException(404, "Artifact not found")
+
+
+@app.get("/jobs/{job_id}/brain-response")
+def get_brain_response(job_id: str, request: Request):
+    """Animated Plotly figure for all scored optimizer iterations so far."""
+    job = job_manager.jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    scored = [r for r in job.iterations if r.brain_residual is not None]
+    if not scored:
+        raise HTTPException(404, "No scored brain-response iterations yet")
+
+    figure, meta = build_brain_response_figure(
+        [r.brain_residual for r in scored],
+        [r.iteration_index for r in scored],
+    )
+    # Plotly 6 encodes large mesh arrays efficiently as typed-array payloads;
+    # preserve its encoder instead of asking FastAPI to walk millions of items.
+    payload = json.dumps(
+        {"figure": json.loads(figure.to_json()), "meta": meta},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {"Cache-Control": "no-store", "Vary": "Accept-Encoding"}
+    if "gzip" in request.headers.get("accept-encoding", "").lower():
+        payload = gzip.compress(payload, compresslevel=5)
+        headers["Content-Encoding"] = "gzip"
+    return Response(content=payload, media_type="application/json", headers=headers)

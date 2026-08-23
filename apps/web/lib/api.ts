@@ -1,4 +1,4 @@
-import type { JobDetail } from "./types";
+import type { BrainVisualizationResponse, JobDetail } from "./types";
 
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8000";
@@ -56,4 +56,22 @@ export function jobStreamUrl(jobId: string): string {
 
 export function artifactUrl(jobId: string, filename: string): string {
   return `${API_URL}/jobs/${jobId}/artifacts/${encodeURIComponent(filename)}`;
+}
+
+export async function getBrainVisualization(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<BrainVisualizationResponse> {
+  const res = await fetch(`${API_URL}/jobs/${jobId}/brain-response`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(
+      res.status === 404
+        ? "Waiting for the first scored brain response"
+        : `Failed to load brain response: ${res.statusText}`
+    );
+  }
+  return res.json();
 }

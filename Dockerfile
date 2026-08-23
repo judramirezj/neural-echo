@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 ENV UV_PYTHON=3.11
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
@@ -21,16 +23,23 @@ COPY services/ ./services/
 
 # Baked outside /app/data on purpose: render.yaml mounts a persistent disk at
 # /app/data, which would shadow/hide anything COPY'd there at build time
-# (mounting an empty volume over a directory replaces its contents). Calibration
-# data is static and image-baked; /app/data is for runtime state (job artifacts,
-# generated candidates, model cache) that should persist across deploys instead.
-COPY data/clip_library/calibration_bundle.npz ./calibration_baked/calibration_bundle.npz
+# (mounting an empty volume over a directory replaces its contents). The stub
+# clip library is static and image-baked; /app/data is for runtime state (job
+# artifacts, generated candidates, model cache) that should persist across
+# deploys instead.
 COPY data/clip_library/raw/ ./calibration_baked/raw/
-ENV CALIBRATION_BUNDLE_PATH=/app/calibration_baked/calibration_bundle.npz
 ENV STUB_CLIPS_DIR=/app/calibration_baked/raw
+
+# Runpod pods should mount their persistent network volume at /app/data. Both
+# model downloads and generated job artifacts then survive pod restarts.
+ENV HF_HOME=/app/data/cache/huggingface
+ENV TRIBE_CACHE_DIR=/app/data/cache/tribe
 
 ENV PORT=8000
 EXPOSE 8000
 
-# Render injects $PORT at runtime — shell form so it's expanded, not passed literally.
-CMD /app/.venv/bin/uvicorn services.api.main:app --host 0.0.0.0 --port ${PORT}
+HEALTHCHECK --interval=30s --timeout=8s --start-period=180s --retries=3 \
+    CMD curl --fail --silent "http://127.0.0.1:${PORT}/health" > /dev/null || exit 1
+
+# Shell wrapper expands Runpod's optional PORT override; exec preserves signals.
+CMD ["sh", "-c", "exec /app/.venv/bin/uvicorn services.api.main:app --host 0.0.0.0 --port ${PORT}"]

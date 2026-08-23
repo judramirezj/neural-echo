@@ -35,6 +35,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, StateGraph
 
 from . import analysis, atlases, compat, metric
+from .brain_visualization import summarize_vertex_residual
 from .generator import ElevenLabsGenerator, Genome, repair_genome
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,8 @@ class IterationResult:
     adherence: float | None = None
     novelty_audio_sim: float | None = None
     is_near_cover: bool | None = None
+    # Internal compact visualization payload; intentionally omitted from SSE.
+    brain_residual: np.ndarray | None = None
 
 
 class OptimizerState(TypedDict):
@@ -495,6 +498,7 @@ class OptimizerRun:
             iteration_index=n, reasoning=reasoning, changes_summary=changes_summary, plan=genome, seed=seed,
             audio_path=audio_path, is_best=is_best, elapsed_s=time.time() - t0, cost=cost,
             adherence=adherence, novelty_audio_sim=novelty["audio_similarity"], is_near_cover=False,
+            brain_residual=summarize_vertex_residual(preds, state["benchmark_preds"]),
         )
         self._finish_iteration(result)
 

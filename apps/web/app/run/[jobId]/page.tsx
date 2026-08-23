@@ -18,6 +18,7 @@ import { BestPanel } from "@/components/run/best-panel";
 import { ConvergenceChart, type ConvergencePoint } from "@/components/run/convergence-chart";
 import { HypothesisLog } from "@/components/run/hypothesis-log";
 import { IterationCard } from "@/components/run/iteration-card";
+import { BrainResponse } from "@/components/run/brain-response";
 
 export default function RunPage() {
   const params = useParams<{ jobId: string }>();
@@ -83,7 +84,8 @@ export default function RunPage() {
             setStatus(msg.status);
             break;
           case "iteration_complete": {
-            const { type: _type, ...iteration } = msg as IterationCompleteEvent;
+            const { type, ...iteration } = msg as IterationCompleteEvent;
+            void type;
             setIterations((prev) => [...prev, iteration]);
             break;
           }
@@ -208,6 +210,14 @@ export default function RunPage() {
           <ConvergenceChart points={convergencePoints} />
         </section>
       )}
+
+      <div className="mb-10">
+        <BrainResponse
+          jobId={jobId}
+          iterationCount={iterations.length || doneResult?.n_iterations || 0}
+          isLive={status === "running" || status === "preparing"}
+        />
+      </div>
 
       {iterations.length > 0 && (
         <section className="mb-10 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">

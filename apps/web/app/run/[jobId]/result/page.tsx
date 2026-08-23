@@ -8,6 +8,7 @@ import type { JobDetail } from "@/lib/types";
 import { fmtNum } from "@/lib/format";
 import { WorstRegions } from "@/components/run/worst-regions";
 import { planSummary } from "@/components/run/plan-summary";
+import { BrainResponse } from "@/components/run/brain-response";
 
 export default function ResultPage() {
   const params = useParams<{ jobId: string }>();
@@ -80,7 +81,7 @@ export default function ResultPage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-12">
+    <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
       <p className="mb-1 text-xs font-medium uppercase tracking-widest text-[var(--accent)]">
         Result
       </p>
@@ -112,6 +113,10 @@ export default function ResultPage() {
       <p className="mb-8 rounded-md border border-white/10 bg-[var(--surface-1)] px-4 py-3 text-sm leading-relaxed text-[var(--text-secondary)]">
         {buildSummary(best.cost.global_score)}
       </p>
+
+      <div className="mb-8">
+        <BrainResponse jobId={jobId} iterationCount={result.n_iterations} />
+      </div>
 
       <section className="mb-8 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">
         <h2 className="mb-3 text-sm font-semibold text-white">Region diagnostics</h2>

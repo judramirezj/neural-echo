@@ -87,6 +87,30 @@ export interface JobDetail extends JobStatusDict {
   result: JobResult | null;
 }
 
+export interface BrainFrameSummary {
+  iteration_index: number;
+  mean_mismatch: number;
+  peak_mismatch: number;
+  active_fraction: number;
+}
+
+export interface BrainVisualizationResponse {
+  // Plotly's JSON schema is deliberately passed through from Python. The
+  // renderer owns validation; keeping it unknown here avoids mirroring the
+  // enormous and versioned Plotly schema in our API contract.
+  figure: {
+    data: unknown[];
+    layout: Record<string, unknown>;
+    frames: unknown[];
+  };
+  meta: {
+    frames: BrainFrameSummary[];
+    threshold: number;
+    scale_max: number;
+    latest_iteration: number;
+  };
+}
+
 export interface IterationCompleteEvent extends IterationResult {
   type: "iteration_complete";
 }
