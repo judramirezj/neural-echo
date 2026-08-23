@@ -55,40 +55,45 @@ def test_identical_clip_near_zero(model, bundle, library_clips):
     assert result.D_brain < 0.05, f"Identical clip should score near 0, got {result.D_brain}"
 
 
-def test_same_track_excerpts_below_25th_percentile(bundle):
-    """Two non-overlapping excerpts of the same track -> small D_brain
-    (< 25th percentile of null). Uses the floor value computed during
-    calibration (brief §3 step 4), which IS this exact measurement.
+def test_same_track_excerpts_high_percentile(bundle):
+    """Two non-overlapping excerpts of the same track -> D_brain small enough
+    to be "closer than 75% of random pairs" (percentile > 75). Uses the floor
+    value computed during calibration (brief §3 step 4), which IS this exact
+    measurement. percentile follows metric.calibrate()'s convention: higher
+    percentile = closer/better (see FINDINGS.md for the sign-flip bug this
+    once had).
     """
-    floor_percentile = float((bundle.null_distribution < bundle.floor).mean() * 100.0)
+    floor_percentile = float((bundle.null_distribution > bundle.floor).mean() * 100.0)
     logger.info("floor=%.4f -> percentile=%.1f", bundle.floor, floor_percentile)
-    assert floor_percentile < 25.0, (
-        f"Same-track floor should be below the 25th percentile of the null distribution, "
+    assert floor_percentile > 75.0, (
+        f"Same-track floor should be closer than 75% of the null distribution, "
         f"got {floor_percentile:.1f}th percentile"
     )
 
 
 def test_music_vs_silence_large_distance(model, bundle, library_clips):
     """Proxy for "music vs. spoken-word podcast": music vs. silence should
-    be a clearly large D_brain (> 75th percentile of null) — silence carries
-    no musical structure at all, the starkest possible contrast available
-    without fetching external speech audio.
+    be a clearly large D_brain (percentile < 25, i.e. closer than only a
+    small fraction of random pairs) — silence carries no musical structure
+    at all, the starkest possible contrast available without fetching
+    external speech audio.
     """
     music_clip = library_clips[0]
     silence_path = Path("data/clip_library/_baseline_silence.wav")
     if not silence_path.exists():
         ingest.generate_silence(silence_path)
     result = _score(model, bundle, music_clip, silence_path)
-    percentile = float((bundle.null_distribution < result.D_brain).mean() * 100.0)
+    percentile = float((bundle.null_distribution > result.D_brain).mean() * 100.0)
     logger.info("music_vs_silence: D_brain=%.4f percentile=%.1f", result.D_brain, percentile)
-    assert percentile > 75.0, (
-        f"Music vs. silence should score above the 75th percentile of null, got {percentile:.1f}th"
+    assert percentile < 25.0, (
+        f"Music vs. silence should score below the 25th percentile of null, got {percentile:.1f}th"
     )
 
 
 def test_loudness_perturbation_stays_small(model, bundle, library_clips, tmp_path):
-    """Loudness-perturbed copy of a clip (±6 LU) -> still small D_brain. If
-    this fails, loudness normalization (ingest.normalize_clip) is broken.
+    """Loudness-perturbed copy of a clip (±6 LU) -> still small D_brain
+    (percentile > 75). If this fails, loudness normalization
+    (ingest.normalize_clip) is broken.
     """
     import soundfile as sf
 
@@ -99,10 +104,10 @@ def test_loudness_perturbation_stays_small(model, bundle, library_clips, tmp_pat
     sf.write(str(louder_path), louder, sr, subtype="FLOAT")
 
     result = _score(model, bundle, clip, louder_path)
-    percentile = float((bundle.null_distribution < result.D_brain).mean() * 100.0)
+    percentile = float((bundle.null_distribution > result.D_brain).mean() * 100.0)
     logger.info("loudness_perturbed: D_brain=%.4f percentile=%.1f", result.D_brain, percentile)
-    assert percentile < 25.0, (
-        f"A loudness-perturbed copy should still score small (<25th percentile), got {percentile:.1f}th — "
+    assert percentile > 75.0, (
+        f"A loudness-perturbed copy should still score close (>75th percentile), got {percentile:.1f}th — "
         "check that inputs are being loudness-normalized before TRIBE sees them"
     )
 

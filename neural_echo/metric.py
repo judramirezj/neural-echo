@@ -229,7 +229,16 @@ def distance(
 
 
 def calibrate(result: DistanceResult, null_distribution: np.ndarray, floor: float) -> DistanceResult:
-    percentile = float((null_distribution < result.D_brain).mean() * 100.0)
+    # percentile is user-facing as "closer than X% of random music pairs" (see
+    # brief/README) — higher must mean better/closer. That means we want the
+    # fraction of null (random-pair) distances that are LARGER than this
+    # candidate's D_brain (i.e. pairs our candidate beats by being closer).
+    # The original `(null_distribution < D_brain).mean()` had this backwards:
+    # a small (good) D_brain produced a LOW percentile, making great matches
+    # read as mediocre in the UI. Confirmed via two real runs: D_brain=0.457
+    # (worse) showed percentile=64.4, D_brain=0.321 (better, beats the floor)
+    # showed percentile=24.4 — the wrong direction entirely.
+    percentile = float((null_distribution > result.D_brain).mean() * 100.0)
     result.percentile = percentile
     result.null_median = float(np.median(null_distribution))
     result.floor = floor

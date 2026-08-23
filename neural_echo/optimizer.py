@@ -320,11 +320,23 @@ class OptimizerRun:
             "learned_insights_so_far": self.learned_insights,
             "instructions": (
                 f"Write a short hypothesis about what is driving the score. Then propose exactly "
-                f"{self.batch_size} new genomes: roughly 6 exploiting the best-scoring region found so "
-                "far (small mutations to bpm/instrumentation/dynamic_arc around the best candidate), and "
-                "4 exploring new regions of the space. Every genome must satisfy the user_constraint and "
-                "avoid the near-cover rejection. Lower D_brain is better; getting closer to noise_floor is "
-                "the goal. Update learned_insights — carry forward what you've learned, don't just repeat it."
+                f"{self.batch_size} new genomes: roughly half testing hypotheses about the best-scoring "
+                "region so far, half exploring genuinely different regions of the space. Neither half "
+                "should mean small, superficial tweaks — this is not hill-climbing by nudging one dial. "
+                "For the 'exploit' half: use best_candidate_per_network_deltas_sigma and "
+                "worst_candidate_per_network_deltas_sigma to form a real hypothesis about WHICH musical "
+                "dimension is driving the score (tempo vs. instrumentation vs. dynamic arc vs. harmonic "
+                "density vs. vocal presence), then change 2-3 parameters together in a way that tests that "
+                "hypothesis — a genome that only differs from the best one by, say, +2 BPM teaches us "
+                "nothing about why it scored well. For the 'explore' half: pick a region of the space "
+                "meaningfully far from everything tried so far (check the full history table, not just "
+                "this generation) — different instrumentation family, different dynamic_arc, different "
+                "tempo band — don't just re-run a near-duplicate of an earlier genome. Every genome must "
+                "still satisfy the user_constraint and avoid the near-cover rejection. Lower D_brain is "
+                "better; getting closer to noise_floor is the goal, but a lucky-looking early score is not "
+                "a reason to stop varying things meaningfully — convergence should be earned by ruling out "
+                "hypotheses across generations, not by repeating the first thing that scored decently. "
+                "Update learned_insights — carry forward what you've learned, don't just repeat it."
             ),
         }
         return system, json.dumps(user, indent=2)
