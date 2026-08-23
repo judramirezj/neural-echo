@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -59,6 +60,11 @@ reference track), while satisfying the user's creative constraint.
 WHY THE INITIAL PLAN IS NOISY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+The reference may come from ANY period or musical tradition: classical, folk and traditional
+music from anywhere in the world, jazz, electronic, urban, rock, metal, experimental, or a
+hybrid. Never default to contemporary pop, four-on-the-floor rhythm, synthesizers, or a standard
+verse/chorus structure unless the reference evidence supports it.
+
 A prompt answers five questions whether you address them or not: genre, mood, instrumentation,
 tempo, and production era. Any dimension you leave open, ElevenLabs fills with "the most
 statistically average choice" — which varies between generations and makes it impossible to
@@ -74,16 +80,19 @@ YOUR STRATEGY, BY PHASE
 {current_phase_note}
 
 PHASE 1 (iterations 1-3): RAISE SPECIFICITY
-The initial plan is generic. Before changing direction, densify the existing plan by covering
-all five dimensions with concrete technical vocabulary:
-  - Genre: specific subgenre, not a broad label
-  - Mood: concrete, compound descriptors
-  - Instrumentation: specific generic instrument/synth type (never a brand or model name)
-  - Tempo: exact BPM
-  - Production era: decade + mixing school
-You can also add production terminology: sidechain compression, parallel bus, plate reverb,
-tape saturation, mid/side EQ, transient shaping, stereo width, headroom, integrated LUFS.
-Goal of this phase: reduce variance, not change direction yet.
+The initial plan is usually generic. Densify it with technical language native to the
+REFERENCE'S musical tradition rather than forcing every track into the vocabulary of modern
+electronic production:
+  - Genre/tradition: an exact subgenre, ensemble, or compositional form
+  - Mood: concrete descriptors appropriate to the source
+  - Instrumentation: ensemble, instrument family, articulation, register, and timbre
+  - Rhythm: exact BPM and meter when stable; otherwise state rubato, free tempo, swing,
+    polyrhythm, or the relevant asymmetric meter
+  - Era and space: period-appropriate recording character, acoustic space, or mixing approach
+Examples across traditions include "baroque harpsichord sonata", "modal acoustic jazz quartet",
+"West African polyrhythmic ensemble", "boom bap hip hop", "ambient drone", and "progressive
+metal in 7/8". Use only the tradition actually supported by the reference.
+Goal of this phase: reduce variance and anchor the generator to the correct musical world.
 
 PHASE 2 (iteration 4+): OPTIMIZE DIRECTION
 With the plan already specific, start moving parameters directed at the cost diagnostics.
@@ -123,18 +132,20 @@ RESTRICTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Hard (never violate):
-  - Never use proper nouns with copyright: artists, bands, songs, films, or branded
-    instrument/synth/drum-machine names. ElevenLabs automatically rejects a plan that contains
-    them. Example: NOT "Juno-60 pad" -> "warm analog polysynth pad"; NOT "TR-909 kick" ->
-    "punchy analog drum machine kick". You may name genres and eras/decades, never brands or
-    people.
+  - Never use names of artists, composers, bands, songs, films, studios, venues, or commercial
+    instrument brands. ElevenLabs may reject them. Replace proper names with precise generic
+    descriptions such as "19th-century romantic symphony", "epic orchestral film score",
+    "solo classical violin", "concert grand piano", or "analog drum machine". You may name
+    genres, traditions, periods, and decades, but never people or brands.
   - The user's creative constraint below must be clearly satisfied:
     "{constraint_text}"
   - Reference vocal guidance: {vocal_guidance}
 
 Soft (respect for coherence):
-  - Stay within the same creative direction across iterations unless a hypothesis calls for a
-    deliberate change — you're refining, not restarting from scratch every iteration.
+  - Stay inside the initial plan's musical world. Do not add distorted synthesizers to an
+    acoustic jazz quartet or delicate harp to death metal unless that contrast is specifically
+    supported by the original or the user's constraint. Refine within the tradition rather than
+    restarting in a familiar default genre.
   - Total plan duration should stay close to the reference's duration ({target_duration_ms}ms).
     Don't compress a long arc into a short one — that destroys the temporal dynamics the
     benchmark captures.
@@ -151,9 +162,10 @@ HOW TO REASON ABOUT THE BRAIN-COST MATRIX
     correlation) between the candidate's and the reference's temporal arc in that region).
   - You may use general neuroscience intuition ONLY to prioritize what to try first (e.g.
     auditory cortices process timbre; motor areas respond to rhythm).
-  - The only source of truth is next iteration's matrix. Never invent precise causal claims
-    ("raising the hi-hat activates the right parietal lobe") — there's no literature backing
-    that specificity.
+  - The only source of truth is next iteration's matrix. Never claim that a specific musical
+    change activates a specific brain region — there is no evidence supporting that level of
+    causality. This applies equally to acoustic, orchestral, vocal, electronic, and traditional
+    instruments.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RESPONSE FORMAT (mandatory, ONLY valid JSON, no extra text)
@@ -189,13 +201,20 @@ def response_text(content) -> str:
 
 
 def parse_llm_json(text: str) -> dict:
-    """Best-effort JSON parse tolerating ```json ... ``` fences the LLM sometimes wraps
-    its response in."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        text = text.removeprefix("json")
-        text = text.strip()
+    """Extract one JSON object from Claude's plain-text response.
+
+    Sonnet can occasionally surround valid JSON with prose or a Markdown
+    fence. The optimizer retries malformed JSON, but accepting these harmless
+    wrappers avoids wasting an LLM call and matches the final notebook logic.
+    """
+    text = str(text).strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end >= start:
+            text = text[start:end + 1]
     return json.loads(text)
 
 
@@ -370,18 +389,25 @@ class OptimizerRun:
             "generate a track in the same sonic world as a reference track, described below by "
             "measured audio features. Also satisfy the user's "
             "creative constraint.\n\n"
+            "The reference can belong to ANY period or musical tradition: classical, folk/world, "
+            "jazz, electronic, urban, rock, metal, experimental, or hybrid. Do not default to pop, "
+            "electronic instrumentation, 4/4, or verse/chorus form. Use only what the measurements "
+            "and user context support; if tempo is unstable, prefer rubato/free-tempo language over "
+            "inventing a rigid BPM.\n\n"
             "Rules:\n"
-            "- Never use proper nouns with copyright (artists, bands, songs, films, branded "
-            "instrument/synth/drum-machine names) — ElevenLabs rejects plans that contain them.\n"
+            "- Never use names of artists, composers, bands, songs, films, studios, venues, or "
+            "commercial instrument brands. Describe the musical property generically instead.\n"
             f"- Vocal handling: {self._vocal_guidance()}\n"
+            "- Describe voices by audible register, delivery, articulation, language, and production; "
+            "do not invent performer identity or demographic attributes.\n"
             "- Chunk text is literal output: section labels, actual lyrics/phonetics, and short inline "
             "cues only. Put genre, mood, instrumentation, and production in styles, never in text.\n"
             "- Each chunk: 3000-120000ms. Total plan duration should approximate the target below.\n"
             "- context_adherence: \"low\" | \"medium\" | \"high\".\n"
             "- Start conservatively with 2-4 chunks, 10-15 positive styles and 5-8 negative styles "
             "per chunk, though the API maximum is 50 each.\n"
-            "- Use concrete technical vocabulary (exact BPM, production techniques, specific generic "
-            "instrument types) — not vague adjectives.\n\n"
+            "- Use tradition-appropriate technical vocabulary: ensemble and articulation, stable BPM "
+            "or rubato/free tempo, meter or rhythmic feel, acoustic space, period, and production.\n\n"
             "Respond with ONLY the JSON plan, no extra text, in this shape:\n"
             '{"chunks": [{"text": "[Genre-appropriate section]", "duration_ms": <int>, '
             '"positive_styles": ["..."], "negative_styles": ["..."], "context_adherence": "high"}, ...]}'
@@ -515,9 +541,9 @@ class OptimizerRun:
                 revised = self._request_reformulation(
                     messages, genome,
                     f"ElevenLabs rejected this plan for a Terms of Service violation ('{gen_result.error}'). "
-                    "This almost always means the plan included a proper noun with copyright (an artist, "
-                    "song, film, or branded instrument/synth/drum-machine name). Replace any proper nouns "
-                    "with equivalent generic descriptions.",
+                    "This usually means the plan included a restricted proper noun (an artist, composer, "
+                    "song, film, studio, venue, or commercial instrument brand). Replace every proper noun "
+                    "with an equivalent precise generic description.",
                     iteration=n,
                 )
                 if revised is None:
