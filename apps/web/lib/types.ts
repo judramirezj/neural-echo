@@ -5,7 +5,7 @@ export interface Chunk {
   duration_ms: number;
   positive_styles: string[];
   negative_styles: string[];
-  // Daniel's ElevenLabs contract allows low, medium, or high.
+  // The ElevenLabs Music v2 contract allows low, medium, or high.
   context_adherence: string;
 }
 

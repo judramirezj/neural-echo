@@ -59,7 +59,7 @@ export default function Home() {
       <div className="mb-8 overflow-hidden rounded-xl border border-white/10 bg-[var(--surface-1)]">
         <div className="border-b border-white/10 px-4 py-3">
           <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-[var(--text-muted)]">
-            Daniel&apos;s optimization loop
+            Brain-guided optimization loop
           </p>
         </div>
         <div className="grid sm:grid-cols-3">
