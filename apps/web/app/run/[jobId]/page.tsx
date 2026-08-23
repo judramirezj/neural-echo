@@ -190,6 +190,14 @@ export default function RunPage() {
         <StatusBanner status={status} error={streamError} />
       </header>
 
+      <div className="mb-10">
+        <BrainResponse
+          jobId={jobId}
+          iterationCount={iterations.length || doneResult?.n_iterations || 0}
+          isLive={status === "running" || status === "preparing"}
+        />
+      </div>
+
       {connectionInterrupted && status !== "done" && status !== "error" && (
         <p className="mb-6 rounded-xl border border-amber-300/20 bg-amber-300/[0.08] px-4 py-3 text-xs text-amber-100">
           The live connection paused. We&apos;re retrying automatically—the optimizer can continue in the background.
@@ -231,14 +239,6 @@ export default function RunPage() {
           <ConvergenceChart points={convergencePoints} />
         </section>
       )}
-
-      <div className="mb-10">
-        <BrainResponse
-          jobId={jobId}
-          iterationCount={iterations.length || doneResult?.n_iterations || 0}
-          isLive={status === "running" || status === "preparing"}
-        />
-      </div>
 
       {iterations.length > 0 && (
         <section className="mb-10 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">
