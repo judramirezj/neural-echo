@@ -24,10 +24,6 @@ to Claude, which writes a hypothesis and proposes the next plan → repeats
 until convergence, a generation cap, or the patience limit. You watch
 it evolve live and download the winner.
 
-**⚠️ License: research demo only.** TRIBE v2 is licensed **CC-BY-NC-4.0** —
-non-commercial use only. Don't ship this as a commercial product without
-relicensing or swapping the brain-encoding model.
-
 The final-user interface is upload-first. YouTube reference input is visibly
 marked as coming soon and cannot be selected.
 

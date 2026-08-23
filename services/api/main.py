@@ -59,7 +59,6 @@ def health():
     return {
         "status": "ok",
         "cuda_available": compat.has_cuda(),
-        "license_note": "TRIBE v2 is CC-BY-NC-4.0 — this is a research demo, non-commercial use only.",
     }
 
 
