@@ -1,7 +1,10 @@
-"""Mandatory validation gate (brief §3) — must pass before Phase 3 (optimizer).
+"""Mandatory validation gate — must pass before trusting the optimizer loop.
 
 Run with: .venv/bin/python -m pytest tests/test_metric_sanity.py -v -s
-Requires data/clip_library/calibration_bundle.npz (run scripts/build_clip_library.py first).
+
+Exercises neural_echo.metric.compute_cost directly against real TRIBE
+predictions. No calibration bundle needed — the metric is self-normalizing
+per region (each region's distance is divided by the benchmark's own norm).
 """
 import logging
 from pathlib import Path
@@ -9,28 +12,22 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from neural_echo import calibration, compat, ingest
+from neural_echo import atlases, compat, ingest, metric
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BUNDLE_PATH = Path("data/clip_library/calibration_bundle.npz")
-RAW_CLIPS_DIR = Path("data/clip_library/raw")
 NORM_CLIPS_DIR = Path("data/clip_library/normalized")
-
-pytestmark = pytest.mark.skipif(
-    not BUNDLE_PATH.exists(), reason="calibration bundle not built — run scripts/build_clip_library.py"
-)
-
-
-@pytest.fixture(scope="module")
-def bundle():
-    return calibration.CalibrationBundle.load(BUNDLE_PATH)
 
 
 @pytest.fixture(scope="module")
 def model():
     return compat.get_tribe_model()
+
+
+@pytest.fixture(scope="module")
+def regions():
+    return atlases.build_lobule_regions()
 
 
 @pytest.fixture(scope="module")
@@ -42,85 +39,66 @@ def library_clips():
     return clips
 
 
-def _score(model, bundle, ref: Path, cand: Path):
-    result, _, _ = calibration.score_against_reference(model, bundle, ref, cand)
-    return result
+def _preds(model, clip_path: Path) -> np.ndarray:
+    df = model.get_events_dataframe(audio_path=str(clip_path))
+    preds, _ = model.predict(events=df)
+    return np.asarray(preds)
 
 
-def test_identical_clip_near_zero(model, bundle, library_clips):
-    """Identical clip -> D_brain ~ 0."""
+def _cost(model, regions, ref: Path, cand: Path) -> metric.CostResult:
+    return metric.compute_cost(_preds(model, cand), _preds(model, ref), regions)
+
+
+def test_identical_clip_near_zero(model, regions, library_clips):
+    """Identical clip -> global_score ~ 0."""
     clip = library_clips[0]
-    result = _score(model, bundle, clip, clip)
-    logger.info("identical_clip: D_brain=%.4f", result.D_brain)
-    assert result.D_brain < 0.05, f"Identical clip should score near 0, got {result.D_brain}"
+    result = _cost(model, regions, clip, clip)
+    logger.info("identical_clip: global_score=%.4f", result.global_score)
+    assert result.global_score < 0.1, f"Identical clip should score near 0, got {result.global_score}"
 
 
-def test_same_track_excerpts_high_percentile(bundle):
-    """Two non-overlapping excerpts of the same track -> D_brain small enough
-    to be "closer than 75% of random pairs" (percentile > 75). Uses the floor
-    value computed during calibration (brief §3 step 4), which IS this exact
-    measurement. percentile follows metric.calibrate()'s convention: higher
-    percentile = closer/better (see FINDINGS.md for the sign-flip bug this
-    once had).
-    """
-    floor_percentile = float((bundle.null_distribution > bundle.floor).mean() * 100.0)
-    logger.info("floor=%.4f -> percentile=%.1f", bundle.floor, floor_percentile)
-    assert floor_percentile > 75.0, (
-        f"Same-track floor should be closer than 75% of the null distribution, "
-        f"got {floor_percentile:.1f}th percentile"
-    )
-
-
-def test_music_vs_silence_large_distance(model, bundle, library_clips):
-    """Proxy for "music vs. spoken-word podcast": music vs. silence should
-    be a clearly large D_brain (percentile < 25, i.e. closer than only a
-    small fraction of random pairs) — silence carries no musical structure
-    at all, the starkest possible contrast available without fetching
-    external speech audio.
-    """
+def test_music_vs_silence_large_score(model, regions, library_clips):
+    """Music vs. silence should score clearly worse than music vs. itself —
+    silence carries no temporal arc to correlate with, and no spatial
+    structure to match either."""
     music_clip = library_clips[0]
     silence_path = Path("data/clip_library/_baseline_silence.wav")
     if not silence_path.exists():
         ingest.generate_silence(silence_path)
-    result = _score(model, bundle, music_clip, silence_path)
-    percentile = float((bundle.null_distribution > result.D_brain).mean() * 100.0)
-    logger.info("music_vs_silence: D_brain=%.4f percentile=%.1f", result.D_brain, percentile)
-    assert percentile < 25.0, (
-        f"Music vs. silence should score below the 25th percentile of null, got {percentile:.1f}th"
+
+    identical = _cost(model, regions, music_clip, music_clip)
+    vs_silence = _cost(model, regions, music_clip, silence_path)
+    logger.info("music_vs_silence: global_score=%.4f (identical=%.4f)", vs_silence.global_score, identical.global_score)
+    assert vs_silence.global_score > identical.global_score + 0.3, (
+        f"Music vs. silence ({vs_silence.global_score:.4f}) should score clearly worse than "
+        f"music vs. itself ({identical.global_score:.4f})"
     )
 
 
-def test_loudness_perturbation_stays_small(model, bundle, library_clips, tmp_path):
-    """Loudness-perturbed copy of a clip (±6 LU) -> still small D_brain
-    (percentile > 75). If this fails, loudness normalization
-    (ingest.normalize_clip) is broken.
-    """
+def test_loudness_perturbation_stays_small(model, regions, library_clips, tmp_path):
+    """Loudness-perturbed copy of a clip (+6dB) -> still small global_score.
+    If this fails, loudness normalization (ingest.normalize_clip) is broken."""
     import soundfile as sf
 
     clip = library_clips[0]
     audio, sr = sf.read(str(clip))
-    louder = np.clip(audio * (10 ** (6 / 20)), -1.0, 1.0)  # +6dB approx +6LU
+    louder = np.clip(audio * (10 ** (6 / 20)), -1.0, 1.0)
     louder_path = tmp_path / "louder.wav"
     sf.write(str(louder_path), louder, sr, subtype="FLOAT")
 
-    result = _score(model, bundle, clip, louder_path)
-    percentile = float((bundle.null_distribution > result.D_brain).mean() * 100.0)
-    logger.info("loudness_perturbed: D_brain=%.4f percentile=%.1f", result.D_brain, percentile)
-    assert percentile > 75.0, (
-        f"A loudness-perturbed copy should still score close (>75th percentile), got {percentile:.1f}th — "
+    result = _cost(model, regions, clip, louder_path)
+    logger.info("loudness_perturbed: global_score=%.4f", result.global_score)
+    assert result.global_score < 0.3, (
+        f"A loudness-perturbed copy should still score small, got {result.global_score:.4f} — "
         "check that inputs are being loudness-normalized before TRIBE sees them"
     )
 
 
-def test_genre_discriminability(model, bundle, library_clips):
-    """For a reference, a genre-matched clip must score closer than a
+def test_genre_discriminability(model, regions, library_clips):
+    """For a reference, a genre-matched clip must score better (lower) than a
     genre-mismatched clip, across at least 5 reference tracks. This is the
-    load-bearing test — if it fails, stop and iterate on masking/baseline/
-    weights before building the optimizer on top of this metric.
-    """
-    # library clip filenames double as genre labels (see
-    # scripts/build_clip_library.py GENRES) — grouped into two families below
-    # as the best available proxy for genre-match without external labels.
+    load-bearing test — if it fails, stop and iterate on the region set /
+    windowing before trusting the optimizer built on top of this metric."""
     electronic_family = {"deep_techno", "drum_and_bass", "reggaeton", "lofi_hiphop"}
     acoustic_family = {"acoustic_folk", "jazz_trio", "classical_piano", "orchestral_cinematic"}
 
@@ -141,12 +119,12 @@ def test_genre_discriminability(model, bundle, library_clips):
         others = [c for j, c in enumerate(library_clips) if j != i]
         if len(others) < 2:
             continue
-        distances = [(_score(model, bundle, ref, c).D_brain, c) for c in others]
-        distances.sort(key=lambda x: x[0])
-        closest, farthest = distances[0], distances[-1]
+        scores = [(_cost(model, regions, ref, c).global_score, c) for c in others]
+        scores.sort(key=lambda x: x[0])
+        closest, farthest = scores[0], scores[-1]
         ref_fam = family(ref.stem)
         if ref_fam == "other":
-            continue  # skip references without a clear family for this proxy test
+            continue
         total += 1
         if family(closest[1].stem) == ref_fam:
             correct += 1
@@ -160,6 +138,6 @@ def test_genre_discriminability(model, bundle, library_clips):
 
     logger.info("Genre discriminability: %d/%d correct", correct, total)
     assert correct >= max(1, int(0.6 * total)), (
-        f"Genre-matched clips should usually score closer than mismatched ones; "
+        f"Genre-matched clips should usually score better than mismatched ones; "
         f"got {correct}/{total} correct — metric may not be measuring musical content"
     )

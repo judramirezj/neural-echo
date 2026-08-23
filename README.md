@@ -63,15 +63,14 @@ demo frictionless, not as an endorsed production pattern.
 ```
 neural_echo/       compat.py    TRIBE compatibility shims (see FINDINGS.md)
                     ingest.py    YouTube/upload -> normalized 45s clip
-                    metric.py    the brain-distance metric (pure functions)
-                    calibration.py  clip library, baselines, masks, null/floor
-                    atlases.py   fsaverage5 anatomical + Yeo-7 network masks
+                    metric.py    the brain-cost function (region x time-window, pure functions)
+                    atlases.py   fsaverage5 Destrieux -> anatomical lobule regions
                     generator.py Genome schema + ElevenLabs async client
                     analysis.py  librosa reference analysis + CLAP scoring
-                    optimizer.py the LLM optimization loop
+                    optimizer.py the single-lineage LangGraph optimization loop
 services/api/       FastAPI app: job submission, SSE progress stream, artifacts
 apps/web/           Next.js frontend (3 screens: setup, evolution, result)
-data/clip_library/  calibration bundle + the 10-clip diverse reference library
+data/clip_library/  the diverse reference clip library (used by tests/smoke test)
 tests/               validation gate (tests/test_metric_sanity.py)
 ```
 
@@ -88,8 +87,6 @@ uv sync                                  # installs everything, incl. tribev2 fr
 brew install ffmpeg                      # if not already installed
 cp .env.example .env                     # fill in ELEVENLABS_API_KEY, ANTHROPIC_API_KEY, HUGGING_FACE_TOKEN
 
-make calibration                         # builds data/clip_library/ — spends ~10 real ElevenLabs
-                                          # calls (one per calibration clip); only needs to run once
 make test                                # runs the mandatory validation gate (tests/test_metric_sanity.py)
 make smoke                               # end-to-end optimizer run using stub audio — zero ElevenLabs cost
 make api                                 # starts the backend at http://localhost:8000
@@ -116,13 +113,11 @@ cd apps/web && npm install && npm run dev  # starts the frontend at http://local
   on this machine even when it didn't. Every score in this system compares
   audio content only, by construction — this is the brief's own recommended
   fix for the lyrics confound (§5), not a shortcut around it.
-- **The calibration clip library ships with 10 clips, not the brief's
-  suggested ~30** — kept small to bound real ElevenLabs spend and build time
-  for this submission. `scripts/build_clip_library.py --n 30` (after adding
-  more entries to its `GENRES` list) rebuilds a larger, more statistically
-  robust null distribution; the null/floor numbers currently in
-  `data/clip_library/calibration_bundle.npz` should be treated as indicative,
-  not final.
+- **The brain-cost metric (`neural_echo/metric.py`) is self-normalizing per
+  anatomical region** — no calibration bundle, baseline subtraction, or null
+  distribution is computed or needed. `data/clip_library/` is kept around only
+  as a diverse reference set for `tests/test_metric_sanity.py` and
+  `scripts/smoke_test.py`, not as a calibration input.
 - **ElevenLabs generation is capped at 2 concurrent requests** on this
   account's tier — `generator.py`'s `ElevenLabsGenerator` defaults its
   semaphore to 2, not the "fire all N concurrently" the brief describes for a

@@ -4,15 +4,13 @@ import { useRef, useState } from "react";
 import { fmtNum } from "@/lib/format";
 
 export interface ConvergencePoint {
-  generationIndex: number;
+  iterationIndex: number;
   bestSoFar: number | null;
-  meanDBrain: number | null;
+  score: number | null;
 }
 
 interface ConvergenceChartProps {
   points: ConvergencePoint[];
-  nullMedian: number | null;
-  noiseFloor: number | null;
 }
 
 const WIDTH = 640;
@@ -21,36 +19,33 @@ const MARGIN = { top: 16, right: 56, bottom: 28, left: 40 };
 const PLOT_W = WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_H = HEIGHT - MARGIN.top - MARGIN.bottom;
 
-export function ConvergenceChart({ points, nullMedian, noiseFloor }: ConvergenceChartProps) {
+export function ConvergenceChart({ points }: ConvergenceChartProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  const maxGen = Math.max(1, ...points.map((p) => p.generationIndex));
+  const maxIter = Math.max(1, ...points.map((p) => p.iterationIndex));
   const allValues = points
-    .flatMap((p) => [p.bestSoFar, p.meanDBrain])
+    .flatMap((p) => [p.bestSoFar, p.score])
     .filter((v): v is number => v !== null);
-  const domainCandidates = [...allValues];
-  if (nullMedian !== null) domainCandidates.push(nullMedian);
-  if (noiseFloor !== null) domainCandidates.push(noiseFloor);
-  const maxVal = domainCandidates.length > 0 ? Math.max(...domainCandidates) * 1.15 : 1;
+  const maxVal = allValues.length > 0 ? Math.max(...allValues) * 1.15 : 1;
   const minVal = 0;
 
-  const x = (gen: number) => (gen / maxGen) * PLOT_W;
+  const x = (iter: number) => (iter / maxIter) * PLOT_W;
   const y = (v: number) => PLOT_H - ((v - minVal) / (maxVal - minVal || 1)) * PLOT_H;
 
   const bestPath = buildPath(points, "bestSoFar", x, y);
-  const meanPath = buildPath(points, "meanDBrain", x, y);
+  const scorePath = buildPath(points, "score", x, y);
 
   const lastBest = [...points].reverse().find((p) => p.bestSoFar !== null);
-  const lastMean = [...points].reverse().find((p) => p.meanDBrain !== null);
+  const lastScore = [...points].reverse().find((p) => p.score !== null);
 
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
     if (!svgRef.current || points.length === 0) return;
     const rect = svgRef.current.getBoundingClientRect();
     const px = ((e.clientX - rect.left) / rect.width) * WIDTH - MARGIN.left;
-    const gen = Math.round((px / PLOT_W) * maxGen);
-    const clamped = Math.min(maxGen, Math.max(0, gen));
-    const idx = points.findIndex((p) => p.generationIndex === clamped);
+    const iter = Math.round((px / PLOT_W) * maxIter);
+    const clamped = Math.min(maxIter, Math.max(0, iter));
+    const idx = points.findIndex((p) => p.iterationIndex === clamped);
     setHoverIdx(idx >= 0 ? idx : null);
   }
 
@@ -60,10 +55,8 @@ export function ConvergenceChart({ points, nullMedian, noiseFloor }: Convergence
   return (
     <div className="relative">
       <div className="mb-2 flex items-center gap-4 text-xs">
-        <LegendKey color="var(--accent)" label="Best D_brain so far" />
-        <LegendKey color="var(--series-2)" label="Mean D_brain (this generation)" />
-        {noiseFloor !== null && <LegendKey color="var(--status-good)" dashed label="Noise floor" />}
-        {nullMedian !== null && <LegendKey color="var(--text-muted)" dashed label="Random-pair median" />}
+        <LegendKey color="var(--accent)" label="Best score so far" />
+        <LegendKey color="var(--series-2)" label="This iteration's score" />
       </div>
       <svg
         ref={svgRef}
@@ -72,7 +65,7 @@ export function ConvergenceChart({ points, nullMedian, noiseFloor }: Convergence
         onMouseMove={handleMove}
         onMouseLeave={() => setHoverIdx(null)}
         role="img"
-        aria-label="Convergence of best and mean D_brain across generations"
+        aria-label="Convergence of best and per-iteration score across iterations"
       >
         <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>
           {/* gridlines */}
@@ -88,71 +81,47 @@ export function ConvergenceChart({ points, nullMedian, noiseFloor }: Convergence
           {/* x axis ticks */}
           {points.map((p) => (
             <text
-              key={p.generationIndex}
-              x={x(p.generationIndex)}
+              key={p.iterationIndex}
+              x={x(p.iterationIndex)}
               y={PLOT_H + 18}
               textAnchor="middle"
               fontSize={10}
               fill="var(--text-muted)"
             >
-              {p.generationIndex}
+              {p.iterationIndex}
             </text>
           ))}
 
-          {/* reference lines */}
-          {noiseFloor !== null && (
-            <line
-              x1={0}
-              x2={PLOT_W}
-              y1={y(noiseFloor)}
-              y2={y(noiseFloor)}
-              stroke="var(--status-good)"
-              strokeWidth={1.5}
-              strokeDasharray="5 4"
-            />
-          )}
-          {nullMedian !== null && (
-            <line
-              x1={0}
-              x2={PLOT_W}
-              y1={y(nullMedian)}
-              y2={y(nullMedian)}
-              stroke="var(--text-muted)"
-              strokeWidth={1.5}
-              strokeDasharray="5 4"
-            />
-          )}
-
           {/* series */}
-          <path d={meanPath} fill="none" stroke="var(--series-2)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          <path d={scorePath} fill="none" stroke="var(--series-2)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           <path d={bestPath} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
 
           {points.map((p) =>
             p.bestSoFar !== null ? (
-              <circle key={`b${p.generationIndex}`} cx={x(p.generationIndex)} cy={y(p.bestSoFar)} r={4} fill="var(--accent)" stroke="var(--surface-2)" strokeWidth={2} />
+              <circle key={`b${p.iterationIndex}`} cx={x(p.iterationIndex)} cy={y(p.bestSoFar)} r={4} fill="var(--accent)" stroke="var(--surface-2)" strokeWidth={2} />
             ) : null
           )}
           {points.map((p) =>
-            p.meanDBrain !== null ? (
-              <circle key={`m${p.generationIndex}`} cx={x(p.generationIndex)} cy={y(p.meanDBrain)} r={4} fill="var(--series-2)" stroke="var(--surface-2)" strokeWidth={2} />
+            p.score !== null ? (
+              <circle key={`s${p.iterationIndex}`} cx={x(p.iterationIndex)} cy={y(p.score)} r={4} fill="var(--series-2)" stroke="var(--surface-2)" strokeWidth={2} />
             ) : null
           )}
 
           {/* end labels */}
           {lastBest?.bestSoFar != null && (
-            <text x={x(lastBest.generationIndex) + 8} y={y(lastBest.bestSoFar)} fontSize={11} fill="var(--text-primary)" dominantBaseline="middle">
+            <text x={x(lastBest.iterationIndex) + 8} y={y(lastBest.bestSoFar)} fontSize={11} fill="var(--text-primary)" dominantBaseline="middle">
               {fmtNum(lastBest.bestSoFar)}
             </text>
           )}
-          {lastMean?.meanDBrain != null && (
-            <text x={x(lastMean.generationIndex) + 8} y={y(lastMean.meanDBrain)} fontSize={11} fill="var(--text-secondary)" dominantBaseline="middle">
-              {fmtNum(lastMean.meanDBrain)}
+          {lastScore?.score != null && (
+            <text x={x(lastScore.iterationIndex) + 8} y={y(lastScore.score)} fontSize={11} fill="var(--text-secondary)" dominantBaseline="middle">
+              {fmtNum(lastScore.score)}
             </text>
           )}
 
           {/* crosshair */}
           {hoverPoint && (
-            <line x1={x(hoverPoint.generationIndex)} x2={x(hoverPoint.generationIndex)} y1={0} y2={PLOT_H} stroke="var(--text-muted)" strokeWidth={1} />
+            <line x1={x(hoverPoint.iterationIndex)} x2={x(hoverPoint.iterationIndex)} y1={0} y2={PLOT_H} stroke="var(--text-muted)" strokeWidth={1} />
           )}
         </g>
       </svg>
@@ -161,14 +130,14 @@ export function ConvergenceChart({ points, nullMedian, noiseFloor }: Convergence
         <div
           className="pointer-events-none absolute rounded border border-white/10 bg-[var(--surface-2)] px-2.5 py-1.5 text-xs shadow-lg"
           style={{
-            left: `${((MARGIN.left + x(hoverPoint.generationIndex)) / WIDTH) * 100}%`,
+            left: `${((MARGIN.left + x(hoverPoint.iterationIndex)) / WIDTH) * 100}%`,
             top: 0,
             transform: "translate(-50%, -100%)",
           }}
         >
-          <p className="mb-1 font-medium text-white">Generation {hoverPoint.generationIndex}</p>
+          <p className="mb-1 font-medium text-white">Iteration {hoverPoint.iterationIndex}</p>
           <p className="text-[var(--accent)]">best: {fmtNum(hoverPoint.bestSoFar)}</p>
-          <p className="text-[var(--series-2)]">mean: {fmtNum(hoverPoint.meanDBrain)}</p>
+          <p className="text-[var(--series-2)]">score: {fmtNum(hoverPoint.score)}</p>
         </div>
       )}
     </div>
@@ -177,8 +146,8 @@ export function ConvergenceChart({ points, nullMedian, noiseFloor }: Convergence
 
 function buildPath(
   points: ConvergencePoint[],
-  key: "bestSoFar" | "meanDBrain",
-  x: (g: number) => number,
+  key: "bestSoFar" | "score",
+  x: (iter: number) => number,
   y: (v: number) => number
 ): string {
   const segs: string[] = [];
@@ -186,7 +155,7 @@ function buildPath(
   for (const p of points) {
     const v = p[key];
     if (v === null) continue;
-    segs.push(`${started ? "L" : "M"}${x(p.generationIndex)},${y(v)}`);
+    segs.push(`${started ? "L" : "M"}${x(p.iterationIndex)},${y(v)}`);
     started = true;
   }
   return segs.join(" ");
@@ -202,19 +171,11 @@ function niceTicks(min: number, max: number, count: number): number[] {
   return ticks;
 }
 
-function LegendKey({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
+function LegendKey({ color, label }: { color: string; label: string }) {
   return (
     <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
       <svg width="16" height="8" aria-hidden="true">
-        <line
-          x1="0"
-          y1="4"
-          x2="16"
-          y2="4"
-          stroke={color}
-          strokeWidth="2"
-          strokeDasharray={dashed ? "3 2" : undefined}
-        />
+        <line x1="0" y1="4" x2="16" y2="4" stroke={color} strokeWidth="2" />
       </svg>
       {label}
     </span>

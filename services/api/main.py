@@ -6,7 +6,6 @@ TRIBE model is loaded once at startup and kept warm for the process lifetime.
 import asyncio
 import json
 import logging
-import os
 import shutil
 import sys
 from contextlib import asynccontextmanager
@@ -20,29 +19,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from neural_echo import compat, ingest
-from services.api.jobs import JOBS_DIR, JobManager, _generation_to_dict
+from services.api.jobs import JOBS_DIR, JobManager, _iteration_to_dict
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Configurable via env so deployments can bake this into the image at a path
-# outside any mounted persistent disk — a disk mounted at the same path would
-# otherwise shadow/hide whatever the Dockerfile COPY'd in (see render.yaml).
-CALIBRATION_BUNDLE_PATH = Path(
-    os.environ.get("CALIBRATION_BUNDLE_PATH", "data/clip_library/calibration_bundle.npz")
-)
-
-job_manager = JobManager(CALIBRATION_BUNDLE_PATH)
+job_manager = JobManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not CALIBRATION_BUNDLE_PATH.exists():
-        logger.warning(
-            "No calibration bundle at %s — run scripts/build_clip_library.py before creating real jobs.",
-            CALIBRATION_BUNDLE_PATH,
-        )
     logger.info("Loading TRIBE model (warm singleton)...")
     compat.get_tribe_model()
     logger.info("TRIBE model ready.")
@@ -63,7 +50,6 @@ def health():
     return {
         "status": "ok",
         "cuda_available": compat.has_cuda(),
-        "calibration_bundle_present": CALIBRATION_BUNDLE_PATH.exists(),
         "license_note": "TRIBE v2 is CC-BY-NC-4.0 — this is a research demo, non-commercial use only.",
     }
 
@@ -74,8 +60,7 @@ async def create_job(
     youtube_url: str | None = Form(None),
     file: UploadFile | None = File(None),
     dry_run: bool = Form(False),
-    batch_size: int = Form(10),
-    max_generations: int = Form(6),
+    max_iterations: int = Form(10),
     adherence_tau: float = Form(0.15),
 ):
     if not youtube_url and not file:
@@ -104,8 +89,7 @@ async def create_job(
         reference_path=reference_path,
         constraint_text=constraint_text,
         dry_run=dry_run,
-        batch_size=batch_size,
-        max_generations=max_generations,
+        max_iterations=max_iterations,
         adherence_tau=adherence_tau,
     )
     return {"job_id": job.id}
@@ -126,7 +110,7 @@ async def stream_job(job_id: str):
         raise HTTPException(404, "Job not found")
 
     async def event_stream():
-        # job.generations (an append-only list, safe to read across threads
+        # job.iterations (an append-only list, safe to read across threads
         # under the GIL) is the source of truth, polled by index — NOT
         # job.events (a single shared Queue.get(), which would drop or
         # duplicate events across multiple concurrent/reconnecting clients,
@@ -143,9 +127,9 @@ async def stream_job(job_id: str):
                 last_status = job.status
                 yield f"data: {json.dumps({'type': 'status', 'status': last_status})}\n\n"
 
-            generations = job.generations
-            while sent < len(generations):
-                yield f"data: {json.dumps(_generation_to_dict(generations[sent]))}\n\n"
+            iterations = job.iterations
+            while sent < len(iterations):
+                yield f"data: {json.dumps(_iteration_to_dict(iterations[sent]))}\n\n"
                 sent += 1
 
             if job.status == "done":

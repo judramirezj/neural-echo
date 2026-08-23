@@ -1,12 +1,17 @@
 """Genome schema (what the optimizer's LLM emits) and the ElevenLabs client
 that turns a Genome into audio. Never accepts free-form text from the LLM for
 composition — everything is validated pydantic, repaired or rejected.
+
+The LLM only ever controls chunks (text/duration/styles/context_adherence)
+plus a separate top-level generation seed passed straight to ElevenLabs — no
+global musical knobs (bpm, key, etc.) beyond what's expressed in prose within
+each chunk's styles, matching the optimizer's single-lineage plan-mutation
+loop (neural_echo/optimizer.py).
 """
 import asyncio
 import hashlib
 import logging
 import os
-from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
@@ -18,14 +23,6 @@ MIN_CHUNK_S = 3
 MAX_CHUNK_S = 120
 MIN_TOTAL_S = 3
 MAX_TOTAL_S = 600
-TARGET_TOTAL_S = 45  # matches metric.py's fixed comparison window
-
-
-class DynamicArc(str, Enum):
-    flat = "flat"
-    crescendo = "crescendo"
-    peak_and_fall = "peak_and_fall"
-    multi_peak = "multi_peak"
 
 
 class Chunk(BaseModel):
@@ -47,21 +44,8 @@ class Chunk(BaseModel):
 
 class Genome(BaseModel):
     """Everything the optimizer's LLM controls, serialized straight to an
-    ElevenLabs Music v2 composition plan. Global knobs exist so the LLM
-    reasons at the level the brief specifies (§4) rather than only editing
-    prose inside chunk styles.
-    """
-    bpm: int = Field(..., ge=40, le=220)
-    key_mode: str = Field(..., description='e.g. "C minor", "A major"')
-    instrumentation: list[str] = Field(..., min_length=1, max_length=10)
-    texture_density: float = Field(..., ge=0.0, le=1.0)
-    dynamic_arc: DynamicArc
-    vocal_presence: bool
-    brightness: float = Field(..., ge=0.0, le=1.0)
-    space_reverb: float = Field(..., ge=0.0, le=1.0)
-    section_count: int = Field(..., ge=1, le=MAX_CHUNKS)
+    ElevenLabs Music v2 composition plan."""
     chunks: list[Chunk] = Field(..., min_length=1, max_length=MAX_CHUNKS)
-    rationale: str = Field(default="", description="LLM's one-line reason for this genome's design")
 
     @field_validator("chunks")
     @classmethod
@@ -101,7 +85,6 @@ def repair_genome(raw: dict) -> Genome | None:
         elif total_ms < MIN_TOTAL_S * 1000 and chunks:
             chunks[-1]["duration_ms"] += (MIN_TOTAL_S * 1000 - total_ms)
         raw["chunks"] = chunks
-        raw.setdefault("section_count", len(chunks))
         return Genome.model_validate(raw)
     except Exception as e:
         logger.error("Genome repair failed, rejecting: %s", e)
@@ -149,8 +132,12 @@ class ElevenLabsGenerator:
         idx = int(genome.content_hash(), 16) % len(stubs)
         return stubs[idx]
 
-    async def generate_one(self, genome: Genome) -> GenerationResult:
-        out_path = self.output_dir / f"{genome.content_hash()}.mp3"
+    async def generate_one(self, genome: Genome, seed: int | None = None) -> GenerationResult:
+        # Cache key includes the seed: the same plan rendered with a different
+        # seed is different audio, so content_hash() alone would wrongly serve
+        # a stale cached file for a reseeded retry of the same plan.
+        cache_key = f"{genome.content_hash()}_{seed}" if seed is not None else genome.content_hash()
+        out_path = self.output_dir / f"{cache_key}.mp3"
         if out_path.exists():
             return GenerationResult(genome=genome, audio_path=str(out_path), dry_run=self.dry_run)
 
@@ -164,27 +151,39 @@ class ElevenLabsGenerator:
             max_attempts = 5
             for attempt in range(max_attempts):
                 try:
+                    compose_kwargs = {
+                        "composition_plan": genome.to_composition_plan(),
+                        "model_id": "music_v2",
+                        "respect_sections_durations": True,
+                    }
+                    if seed is not None:
+                        compose_kwargs["seed"] = seed
                     chunks = []
-                    async for b in self._client.music.compose(
-                        composition_plan=genome.to_composition_plan(),
-                        model_id="music_v2",
-                        respect_sections_durations=True,
-                    ):
+                    async for b in self._client.music.compose(**compose_kwargs):
                         chunks.append(b)
                     out_path.write_bytes(b"".join(chunks))
                     return GenerationResult(genome=genome, audio_path=str(out_path), dry_run=False)
                 except Exception as e:
-                    is_rate_limit = "429" in str(e) or "concurrent_limit_exceeded" in str(e)
-                    if is_rate_limit and attempt < max_attempts - 1:
+                    msg = str(e)
+                    is_rate_limit = "429" in msg or "concurrent_limit_exceeded" in msg
+                    is_transient = (
+                        "status_code: 5" in msg or "internal_server_error" in msg
+                        or "timeout" in msg.lower() or "connection" in msg.lower()
+                    )
+                    if (is_rate_limit or is_transient) and attempt < max_attempts - 1:
                         delay = 2.0 * (2 ** attempt)
                         logger.warning(
-                            "Rate limited generating genome %s, retrying in %.1fs (attempt %d/%d)",
-                            genome.content_hash(), delay, attempt + 1, max_attempts,
+                            "Transient error generating genome %s, retrying in %.1fs (attempt %d/%d): %s",
+                            cache_key, delay, attempt + 1, max_attempts, msg,
                         )
                         await asyncio.sleep(delay)
                         continue
-                    logger.error("ElevenLabs generation failed for genome %s: %s", genome.content_hash(), e)
-                    return GenerationResult(genome=genome, audio_path="", dry_run=False, error=str(e))
+                    # Non-transient (e.g. ToS/copyright rejection): return the error
+                    # immediately without exhausting the retry budget — the caller
+                    # (the optimizer) is responsible for asking the LLM to revise
+                    # content-policy violations, which retrying alone can't fix.
+                    logger.error("ElevenLabs generation failed for genome %s: %s", cache_key, e)
+                    return GenerationResult(genome=genome, audio_path="", dry_run=False, error=msg)
 
     async def generate_batch(self, genomes: list[Genome]) -> list[GenerationResult]:
         return await asyncio.gather(*(self.generate_one(g) for g in genomes))

@@ -1,11 +1,11 @@
-"""librosa audio analysis (for the optimizer's Generation 0 prompt) and CLAP-
+"""librosa audio analysis (for the optimizer's initial-plan prompt) and CLAP-
 based constraint adherence / novelty scoring (brief §5).
 
-CLAP is a hard filter, not a weighted term: the optimizer ranks only
+CLAP is a hard filter, not a weighted term: the optimizer only scores
 candidates whose adherence clears a calibrated threshold tau; a candidate
 whose novelty (audio-audio similarity to the reference) exceeds the ceiling,
 or whose tempo/instrumentation delta vs. the reference is too small, is a
-"cover" and gets rejected outright — never blended into D_brain.
+"cover" and gets rejected outright — never blended into the brain-cost score.
 """
 import logging
 import threading
@@ -126,10 +126,9 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 def constraint_adherence(candidate_audio_path: str, constraint_text: str) -> float:
     """Cosine similarity between candidate audio and the user's constraint
-    text, in CLAP's joint embedding space. Compare against a calibrated
-    threshold tau (calibration.py should compute this from the clip library
-    against a few held-out constraint phrases); a bare cosine number means
-    little on its own."""
+    text, in CLAP's joint embedding space. Compared against the optimizer's
+    adherence_tau threshold (neural_echo/optimizer.py) — a bare cosine number
+    means little on its own."""
     audio_emb = clap_audio_embedding(candidate_audio_path)
     text_emb = clap_text_embedding(constraint_text)
     return _cosine(audio_emb, text_emb)
@@ -144,7 +143,7 @@ def novelty_check(
     """Hard novelty filter (brief §5): audio-audio CLAP similarity below a
     ceiling AND a minimum tempo delta vs. the reference. Either condition
     failing marks the candidate a near-cover — rejected outright, reported
-    to the LLM as a signal, never blended into D_brain.
+    to the LLM as a signal, never blended into the brain-cost score.
 
     Pass reference_embedding (from a single upfront clap_audio_embedding
     call) when checking many candidates against one fixed reference — e.g.

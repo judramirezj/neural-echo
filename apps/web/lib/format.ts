@@ -19,15 +19,15 @@ export function fmtSeconds(v: number | null | undefined, digits = 1): string {
   return `${v.toFixed(digits)}s`;
 }
 
-/** Lowest D_brain among candidates seen so far (D_brain=null candidates are unscored/rejected). */
-export function bestByDBrain<T extends { D_brain: number | null }>(
-  candidates: T[]
+/** Lowest global_score among iterations seen so far (cost=null iterations were rejected/unscored). */
+export function bestByScore<T extends { cost: { global_score: number } | null }>(
+  iterations: T[]
 ): T | null {
   let best: T | null = null;
-  for (const c of candidates) {
-    if (c.D_brain === null) continue;
-    if (best === null || best.D_brain === null || c.D_brain < best.D_brain) {
-      best = c;
+  for (const it of iterations) {
+    if (it.cost === null) continue;
+    if (best === null || best.cost === null || it.cost.global_score < best.cost.global_score) {
+      best = it;
     }
   }
   return best;

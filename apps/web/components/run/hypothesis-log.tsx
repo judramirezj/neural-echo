@@ -1,41 +1,37 @@
-import type { GenerationCompleteEvent } from "@/lib/types";
+import type { IterationResult } from "@/lib/types";
 import { fmtSeconds } from "@/lib/format";
 
 interface HypothesisLogProps {
-  generations: GenerationCompleteEvent[];
+  iterations: IterationResult[];
 }
 
-export function HypothesisLog({ generations }: HypothesisLogProps) {
-  if (generations.length === 0) {
+export function HypothesisLog({ iterations }: HypothesisLogProps) {
+  if (iterations.length === 0) {
     return (
       <p className="text-sm text-[var(--text-muted)]">
-        Waiting for the first generation to complete…
+        Waiting for the first iteration to complete…
       </p>
     );
   }
 
-  const chronological = [...generations].sort((a, b) => b.generation_index - a.generation_index);
-  const latest = chronological[0];
+  const chronological = [...iterations].sort((a, b) => b.iteration_index - a.iteration_index);
 
   return (
-    <div>
-      {latest.learned_insights && (
-        <p className="mb-4 rounded-md border border-white/10 bg-[var(--surface-2)] px-3 py-2 text-xs text-[var(--text-secondary)]">
-          <span className="font-medium text-[var(--text-primary)]">Notes carried forward — </span>
-          {latest.learned_insights}
-        </p>
-      )}
-      <ol className="space-y-4">
-        {chronological.map((g) => (
-          <li key={g.generation_index} className="border-l-2 border-[var(--accent)]/40 pl-4">
-            <div className="mb-1 flex items-baseline gap-2">
-              <span className="text-sm font-semibold text-white">Generation {g.generation_index}</span>
-              <span className="text-xs text-[var(--text-muted)]">{fmtSeconds(g.elapsed_s)}</span>
-            </div>
-            <p className="text-sm leading-relaxed text-[var(--text-secondary)]">{g.hypothesis}</p>
-          </li>
-        ))}
-      </ol>
-    </div>
+    <ol className="space-y-4">
+      {chronological.map((it) => (
+        <li key={it.iteration_index} className="border-l-2 border-[var(--accent)]/40 pl-4">
+          <div className="mb-1 flex items-baseline gap-2">
+            <span className="text-sm font-semibold text-white">Iteration {it.iteration_index}</span>
+            <span className="text-xs text-[var(--text-muted)]">{fmtSeconds(it.elapsed_s)}</span>
+          </div>
+          {it.reasoning && (
+            <p className="text-sm leading-relaxed text-[var(--text-secondary)]">{it.reasoning}</p>
+          )}
+          {it.changes_summary && (
+            <p className="mt-1 text-xs italic text-[var(--text-muted)]">{it.changes_summary}</p>
+          )}
+        </li>
+      ))}
+    </ol>
   );
 }

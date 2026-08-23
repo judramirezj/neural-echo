@@ -1,270 +1,170 @@
-"""The brain-distance metric. Pure functions only — no I/O, no TRIBE calls.
+"""The brain-cost function. Pure functions only — no I/O, no TRIBE calls.
 
-Why a naive np.linalg.norm(preds_ref - preds_cand) is wrong, and what each step
-here does about it (see project brief §3 for the full rationale):
-
-  1. Length mismatch          -> length-invariant descriptors (spatial mean,
-                                  temporal stats, network correlation), never
-                                  raw per-timestep alignment.
-  2. Global-mean domination   -> subtract a pink-noise/silence baseline before
-                                  anything else (subtract_baseline).
-  3. Vertex heteroscedasticity -> z-score dynamics descriptors against
-                                  clip-library stats before combining them.
-  4. Dead vertices             -> vertex_mask restricts everything to
-                                  audio-relevant cortex (see atlases.py).
-  5. Degenerate optimum        -> deliberately NOT handled here; novelty/
-                                  adherence are separate hard filters applied
-                                  downstream in the optimizer, never folded
-                                  into D_brain (see generator.py / optimizer.py).
+Compares a candidate's and a benchmark's raw TRIBE predictions region-by-region:
+each of ~50 anatomical lobule groups (atlases.build_lobule_regions, left/right
+hemispheres separate) is temporally summarized into N_TIME_WINDOWS equal time
+bins, then compared as a (region, window) matrix — an L2-normalized distance
+between the two arcs plus (1 - their correlation), averaged across regions
+into a single global_score. Lower is better; there is no upper bound and no
+external calibration (no baseline subtraction, no vertex masking, no null
+distribution) — the score is self-normalizing per region via division by the
+benchmark's own norm.
 
 Everything below operates on `preds`: a (n_timesteps, 20484) array as returned
-by TribeModel.predict(), at TIMESTEP_RATE_HZ (empirically 1.0, see FINDINGS.md).
+by TribeModel.predict().
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
-from scipy import stats as sp_stats
 
-TIMESTEP_RATE_HZ = 1.0  # confirmed empirically in Phase 0 — do not assume, re-verify if TRIBE changes
-EDGE_TRIM_S = 6  # discard hemodynamic-lag edge artifacts (brief §3 step 0)
-SPECTRUM_BAND_HZ = (0.01, 0.15)  # BOLD-relevant band; faster is measurement noise
-N_SPECTRUM_BINS = 8
-N_AUTOCORR_LAGS = 5
-
-DEFAULT_WEIGHTS = dict(spatial=0.5, dynamics=0.2, geometry=0.3)
+N_TIME_WINDOWS = 12
 
 
-def trim_edges(preds: np.ndarray, rate_hz: float = TIMESTEP_RATE_HZ) -> np.ndarray:
-    n_trim = int(round(EDGE_TRIM_S * rate_hz))
-    if preds.shape[0] <= 2 * n_trim:
-        return preds  # too short to trim; caller should use a longer clip
-    return preds[n_trim: preds.shape[0] - n_trim]
-
-
-def subtract_baseline(preds: np.ndarray, baseline_mean: np.ndarray) -> np.ndarray:
-    """ΔX = X - baseline_mean, per brief §3 step 0b. baseline_mean is the
-    per-vertex mean prediction over pink-noise + silence stimuli (see
-    calibration.compute_baseline) — removes the "any audio" constant prior.
-    """
-    return preds - baseline_mean[None, :]
-
-
-def apply_mask(delta: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    return delta[:, mask]
-
-
-@dataclass
-class BrainProfile:
-    """Length-invariant descriptors of one clip's masked, baseline-subtracted
-    brain response. Comparable across clips of different duration."""
-    spatial: np.ndarray            # (k,) mean over time per vertex
-    vertex_std: np.ndarray         # (k,) std over time per vertex
-    spectrum: np.ndarray           # (N_SPECTRUM_BINS,) low-freq power of ROI-mean timecourse
-    autocorr: np.ndarray           # (N_AUTOCORR_LAGS,) lag-1..lag-5 autocorr of ROI-mean timecourse
-    network_corr_upper: np.ndarray  # (n_pairs,) vectorized upper triangle of network x network corr
-    n_timesteps: int
-
-    @property
-    def dynamics_raw(self) -> np.ndarray:
-        return np.concatenate([self.vertex_std, self.spectrum, self.autocorr])
-
-
-def _roi_mean_timecourse(delta_masked: np.ndarray) -> np.ndarray:
-    return delta_masked.mean(axis=1)
-
-
-def _low_freq_spectrum(timecourse: np.ndarray, rate_hz: float) -> np.ndarray:
-    n = len(timecourse)
-    if n < 4:
-        return np.zeros(N_SPECTRUM_BINS)
-    windowed = timecourse - timecourse.mean()
-    windowed = windowed * np.hanning(n)
-    spectrum = np.abs(np.fft.rfft(windowed)) ** 2
-    freqs = np.fft.rfftfreq(n, d=1.0 / rate_hz)
-
-    lo, hi = SPECTRUM_BAND_HZ
-    edges = np.linspace(lo, hi, N_SPECTRUM_BINS + 1)
-    binned = np.zeros(N_SPECTRUM_BINS)
-    for i in range(N_SPECTRUM_BINS):
-        sel = (freqs >= edges[i]) & (freqs < edges[i + 1])
-        if sel.any():
-            binned[i] = spectrum[sel].mean()
-        # else leave at 0 — frequency resolution (1/duration) can exceed bin
-        # width for short clips; an empty bin is a real (if coarse) result,
-        # not a bug.
-    return binned
-
-
-def _autocorr_lags(timecourse: np.ndarray, n_lags: int = N_AUTOCORR_LAGS) -> np.ndarray:
-    n = len(timecourse)
-    x = timecourse - timecourse.mean()
-    denom = np.sum(x ** 2) + 1e-12
-    out = np.zeros(n_lags)
-    for lag in range(1, n_lags + 1):
-        if lag >= n:
-            break
-        out[lag - 1] = np.sum(x[:-lag] * x[lag:]) / denom
-    return out
-
-
-def _network_correlation_upper(
-    delta_masked: np.ndarray, network_labels_masked: np.ndarray | None
+def summarize_by_region_and_window(
+    preds: np.ndarray, regions: dict[str, np.ndarray], n_windows: int = N_TIME_WINDOWS
 ) -> np.ndarray:
-    """Collapse masked vertices into network-mean timecourses, return the
-    vectorized upper triangle of their T-length correlation matrix (brief §3
-    step 2c — "representational geometry" / RSA-style comparison).
+    """(n_timesteps, 20484) -> (n_regions, n_windows): mean over each region's
+    vertices, then mean-pooled into n_windows equal time bins. Region order is
+    sorted region-name order, consistent across calls."""
+    preds = np.asarray(preds, dtype=np.float64)
+    if preds.ndim != 2:
+        raise ValueError(f"Expected (n_timesteps, n_vertices), got shape {preds.shape}")
+    if preds.shape[0] < n_windows:
+        raise ValueError(f"Clip has {preds.shape[0]} timesteps, need at least n_windows={n_windows}")
 
-    If network_labels_masked is None (Yeo atlas unavailable), falls back to a
-    single-network (whole-mask) timecourse, yielding a degenerate 1x1
-    "network geometry" — d_geometry becomes uninformative (spearman on a
-    single scalar), so callers should down-weight geometry when this happens.
-    """
-    if network_labels_masked is None:
-        return np.array([1.0])  # degenerate but stable placeholder
-
-    unique_networks = sorted(n for n in np.unique(network_labels_masked) if n > 0)
-    if len(unique_networks) < 2:
-        return np.array([1.0])
-
-    network_timecourses = np.stack([
-        delta_masked[:, network_labels_masked == net].mean(axis=1)
-        for net in unique_networks
-    ])  # (n_networks, T)
-
-    if network_timecourses.shape[1] < 3:
-        n = len(unique_networks)
-        return np.zeros(n * (n - 1) // 2)
-
-    corr = np.corrcoef(network_timecourses)
-    iu = np.triu_indices_from(corr, k=1)
-    return corr[iu]
+    names = sorted(regions.keys())
+    per_region_time = np.stack([preds[:, regions[n]].mean(axis=1) for n in names], axis=1)  # (T, n_regions)
+    edges = np.linspace(0, preds.shape[0], n_windows + 1).astype(int)
+    return np.stack(
+        [per_region_time[edges[i]:edges[i + 1]].mean(axis=0) for i in range(n_windows)], axis=1,
+    )  # (n_regions, n_windows)
 
 
-def compute_profile(
-    preds: np.ndarray,
-    baseline_mean: np.ndarray,
-    vertex_mask: np.ndarray,
-    network_labels: np.ndarray | None,
-    rate_hz: float = TIMESTEP_RATE_HZ,
-) -> BrainProfile:
-    trimmed = trim_edges(preds, rate_hz)
-    delta = subtract_baseline(trimmed, baseline_mean)
-    delta_masked = apply_mask(delta, vertex_mask)
-
-    roi_timecourse = _roi_mean_timecourse(delta_masked)
-    network_labels_masked = network_labels[vertex_mask] if network_labels is not None else None
-
-    return BrainProfile(
-        spatial=delta_masked.mean(axis=0),
-        vertex_std=delta_masked.std(axis=0),
-        spectrum=_low_freq_spectrum(roi_timecourse, rate_hz),
-        autocorr=_autocorr_lags(roi_timecourse),
-        network_corr_upper=_network_correlation_upper(delta_masked, network_labels_masked),
-        n_timesteps=delta_masked.shape[0],
-    )
+def _correlation(x: np.ndarray, y: np.ndarray) -> float:
+    if x.std() < 1e-8 or y.std() < 1e-8:
+        return 0.0
+    return float(np.corrcoef(x, y)[0, 1])
 
 
 @dataclass
-class DistanceResult:
-    D_brain: float
-    d_spatial: float
-    d_dynamics: float
-    d_geometry: float
-    percentile: float | None = None
-    null_median: float | None = None
-    floor: float | None = None
+class RegionScore:
+    region: str
+    distance: float
+    arc_correlation: float
+    score: float
 
 
-def _safe_pearson(a: np.ndarray, b: np.ndarray) -> float:
-    if a.size < 2 or np.std(a) < 1e-12 or np.std(b) < 1e-12:
-        return 0.0
-    return float(sp_stats.pearsonr(a, b)[0])
+@dataclass
+class WindowSummary:
+    window_index: int
+    rms_error: float
+    mean_bias: float
 
 
-def _safe_spearman(a: np.ndarray, b: np.ndarray) -> float:
-    if a.size < 2 or np.std(a) < 1e-12 or np.std(b) < 1e-12:
-        return 0.0
-    return float(sp_stats.spearmanr(a, b)[0])
+@dataclass
+class WorstCell:
+    window_index: int
+    region: str
+    candidate: float
+    target: float
+    difference: float
 
 
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-    na, nb = np.linalg.norm(a), np.linalg.norm(b)
-    if na < 1e-12 or nb < 1e-12:
-        return 0.0
-    return float(np.dot(a, b) / (na * nb))
+@dataclass
+class Cell:
+    window_index: int
+    region: str
+    candidate: float
+    target: float
+    difference: float
 
 
-def distance(
-    ref: BrainProfile,
-    cand: BrainProfile,
-    dynamics_mean: np.ndarray,
-    dynamics_std: np.ndarray,
-    weights: dict = DEFAULT_WEIGHTS,
-) -> DistanceResult:
-    """Core comparison (brief §3 step 3). dynamics_mean/std come from the
-    calibration clip library (calibration.py) — z-scoring dynamics against
-    the library, not against this single pair, is what makes d_dynamics
-    comparable across candidates.
-    """
-    d_spatial = 1.0 - _safe_pearson(ref.spatial, cand.spatial)
-
-    std_safe = np.where(dynamics_std < 1e-9, 1.0, dynamics_std)
-    z_ref = (ref.dynamics_raw - dynamics_mean) / std_safe
-    z_cand = (cand.dynamics_raw - dynamics_mean) / std_safe
-    d_dynamics = 1.0 - _cosine(z_ref, z_cand)
-
-    if ref.network_corr_upper.shape != cand.network_corr_upper.shape:
-        d_geometry = 1.0  # incomparable shapes -> maximally distant, not a crash
-    else:
-        d_geometry = 1.0 - _safe_spearman(ref.network_corr_upper, cand.network_corr_upper)
-
-    D_brain = (
-        weights["spatial"] * d_spatial
-        + weights["dynamics"] * d_dynamics
-        + weights["geometry"] * d_geometry
-    )
-    return DistanceResult(
-        D_brain=D_brain, d_spatial=d_spatial, d_dynamics=d_dynamics, d_geometry=d_geometry
-    )
+@dataclass
+class CostResult:
+    global_score: float  # mean of all RegionScore.score — lower is better; what the optimizer minimizes
+    regions: list[RegionScore]
+    windows: list[WindowSummary]
+    worst_cell: WorstCell
+    cells: list[Cell]  # full region x window matrix, for the LLM's per-iteration diagnostics
+    laterality: dict[str, float] = field(default_factory=dict)
 
 
-def calibrate(result: DistanceResult, null_distribution: np.ndarray, floor: float) -> DistanceResult:
-    # percentile is user-facing as "closer than X% of random music pairs" (see
-    # brief/README) — higher must mean better/closer. That means we want the
-    # fraction of null (random-pair) distances that are LARGER than this
-    # candidate's D_brain (i.e. pairs our candidate beats by being closer).
-    # The original `(null_distribution < D_brain).mean()` had this backwards:
-    # a small (good) D_brain produced a LOW percentile, making great matches
-    # read as mediocre in the UI. Confirmed via two real runs: D_brain=0.457
-    # (worse) showed percentile=64.4, D_brain=0.321 (better, beats the floor)
-    # showed percentile=24.4 — the wrong direction entirely.
-    percentile = float((null_distribution > result.D_brain).mean() * 100.0)
-    result.percentile = percentile
-    result.null_median = float(np.median(null_distribution))
-    result.floor = floor
-    return result
+def compute_cost(candidate_preds: np.ndarray, benchmark_preds: np.ndarray, regions: dict[str, np.ndarray]) -> CostResult:
+    C = summarize_by_region_and_window(candidate_preds, regions)
+    B = summarize_by_region_and_window(benchmark_preds, regions)
+    names = sorted(regions.keys())
+    n_windows = C.shape[1]
+
+    cell_values = {
+        (v, n): {
+            "candidate": float(C[i, v]), "target": float(B[i, v]), "difference": float(C[i, v] - B[i, v]),
+        }
+        for i, n in enumerate(names) for v in range(n_windows)
+    }
+
+    region_scores: list[RegionScore] = []
+    for i, n in enumerate(names):
+        distance = float(np.linalg.norm(C[i] - B[i]) / (np.linalg.norm(B[i]) + 1e-8))
+        arc_corr = _correlation(C[i], B[i])
+        region_scores.append(RegionScore(region=n, distance=round(distance, 4), arc_correlation=round(arc_corr, 4),
+                                          score=round(distance + (1 - arc_corr), 4)))
+
+    windows: list[WindowSummary] = []
+    for v in range(n_windows):
+        diffs = np.array([cell_values[(v, n)]["difference"] for n in names])
+        windows.append(WindowSummary(window_index=v, rms_error=float(np.sqrt(np.mean(diffs ** 2))),
+                                      mean_bias=float(diffs.mean())))
+
+    worst_key = max(cell_values, key=lambda k: abs(cell_values[k]["difference"]))
+    worst_cell = WorstCell(window_index=worst_key[0], region=worst_key[1], **cell_values[worst_key])
+    cells = [Cell(window_index=v, region=n, **cell_values[(v, n)]) for (v, n) in cell_values]
+
+    score_by_region = {rs.region: rs.score for rs in region_scores}
+    groups = {n.rsplit("_", 1)[0] for n in names}
+    laterality = {}
+    for g in groups:
+        left, right = score_by_region.get(f"{g}_left"), score_by_region.get(f"{g}_right")
+        if left is not None and right is not None:
+            laterality[g] = round(left - right, 4)
+
+    global_score = float(np.mean([rs.score for rs in region_scores]))
+    return CostResult(global_score=global_score, regions=region_scores, windows=windows,
+                       worst_cell=worst_cell, cells=cells, laterality=laterality)
 
 
-def per_network_deltas(
-    profile: BrainProfile,
-    ref_profile: BrainProfile,
-    network_labels_masked: np.ndarray | None,
-) -> dict:
-    """Per-network z-scored engagement delta vs. reference, for the
-    optimizer's LLM diagnostics payload (brief §4: "candidate under-engages
-    auditory association by 0.4σ ..."). Returns {network_name: sigma_delta}.
-    """
-    from . import atlases
+def format_cost_for_llm(result: CostResult, iteration: int | None = None) -> str:
+    lines = []
+    if iteration:
+        lines.append(f"=== Iteration {iteration} ===")
+    lines.append(f"Global score: {result.global_score:.4f} (lower is better)")
+    lines.append("cand=candidate, target=benchmark, diff=cand-target\n")
 
-    if network_labels_masked is None:
-        return {}
-    out = {}
-    for net in sorted(n for n in np.unique(network_labels_masked) if n > 0):
-        sel = network_labels_masked == net
-        if not sel.any():
-            continue
-        cand_mean = profile.spatial[sel].mean()
-        ref_mean = ref_profile.spatial[sel].mean()
-        ref_std = ref_profile.spatial[sel].std() + 1e-9
-        out[atlases.network_name(int(net))] = float((cand_mean - ref_mean) / ref_std)
-    return out
+    region_names = sorted({c.region for c in result.cells})
+    n_windows = len(result.windows)
+    cells_by_window: dict[int, dict[str, Cell]] = {}
+    for c in result.cells:
+        cells_by_window.setdefault(c.window_index, {})[c.region] = c
+
+    lines.append(f"MATRIX {n_windows} windows x {len(region_names)} regions:\n")
+    for w in result.windows:
+        pct_start, pct_end = int(100 * w.window_index / n_windows), int(100 * (w.window_index + 1) / n_windows)
+        lines.append(
+            f"[Window {w.window_index + 1:>2}/{n_windows} ({pct_start:>3}-{pct_end:>3}%)  "
+            f"rms={w.rms_error:.3f}  bias={w.mean_bias:+.3f}]"
+        )
+        for region in region_names:
+            c = cells_by_window[w.window_index][region]
+            marker = "  <== worst" if (w.window_index == result.worst_cell.window_index and region == result.worst_cell.region) else ""
+            lines.append(f"  {region:<24} cand={c.candidate:+.3f}  target={c.target:+.3f}  diff={c.difference:+.3f}{marker}")
+        lines.append("")
+
+    lines.append("Per-region summary:")
+    for rs in result.regions:
+        lines.append(f"  {rs.region:<24} dist={rs.distance:.3f}  arc_corr={rs.arc_correlation:+.3f}  score={rs.score:.3f}")
+
+    if result.laterality:
+        lines.append("\nLeft/right asymmetry (left_score - right_score; positive = left scored worse):")
+        for group, asym in sorted(result.laterality.items()):
+            lines.append(f"  {group:<24} {asym:+.4f}")
+
+    return "\n".join(lines)

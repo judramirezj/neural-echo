@@ -6,18 +6,18 @@ import { useParams } from "next/navigation";
 import { getJob, jobStreamUrl } from "@/lib/api";
 import {
   isTaggedEvent,
-  type Candidate,
-  type GenerationCompleteEvent,
+  type IterationCompleteEvent,
+  type IterationResult,
   type JobResult,
   type JobStatusValue,
   type JobStreamMessage,
 } from "@/lib/types";
-import { bestByDBrain, fmtNum } from "@/lib/format";
+import { bestByScore, fmtNum } from "@/lib/format";
 import { StatusBanner } from "@/components/run/status-banner";
 import { BestPanel } from "@/components/run/best-panel";
 import { ConvergenceChart, type ConvergencePoint } from "@/components/run/convergence-chart";
 import { HypothesisLog } from "@/components/run/hypothesis-log";
-import { GenerationRow } from "@/components/run/generation-row";
+import { IterationCard } from "@/components/run/iteration-card";
 
 export default function RunPage() {
   const params = useParams<{ jobId: string }>();
@@ -29,7 +29,7 @@ export default function RunPage() {
   const [status, setStatus] = useState<JobStatusValue>("pending");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [doneResult, setDoneResult] = useState<JobResult | null>(null);
-  const [generations, setGenerations] = useState<GenerationCompleteEvent[]>([]);
+  const [iterations, setIterations] = useState<IterationResult[]>([]);
   const [staleOnLoad, setStaleOnLoad] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
@@ -82,9 +82,11 @@ export default function RunPage() {
           case "status":
             setStatus(msg.status);
             break;
-          case "generation_complete":
-            setGenerations((prev) => [...prev, msg]);
+          case "iteration_complete": {
+            const { type: _type, ...iteration } = msg as IterationCompleteEvent;
+            setIterations((prev) => [...prev, iteration]);
             break;
+          }
           case "done":
             setDoneResult(msg.result);
             setStatus("done");
@@ -112,64 +114,36 @@ export default function RunPage() {
     };
   }, [jobId, initialLoading, initialError, staleOnLoad]);
 
-  const allCandidates = useMemo(
-    () => generations.flatMap((g) => g.candidates),
-    [generations]
-  );
-
-  const bestOverall: Candidate | null = useMemo(() => {
+  const bestOverall: IterationResult | null = useMemo(() => {
     if (doneResult?.best) return doneResult.best;
-    return bestByDBrain(allCandidates);
-  }, [allCandidates, doneResult]);
-
-  const bestGenerationIndex = useMemo(() => {
-    if (!bestOverall) return null;
-    const found = generations.find((g) =>
-      g.candidates.some(
-        (c) => c.audio_path !== null && c.audio_path === bestOverall.audio_path
-      )
-    );
-    return found?.generation_index ?? null;
-  }, [generations, bestOverall]);
-
-  const nullMedian = doneResult?.null_median ?? null;
-  const noiseFloor = doneResult?.noise_floor ?? null;
+    return bestByScore(iterations);
+  }, [iterations, doneResult]);
 
   const domainMax = useMemo(() => {
-    const scored = allCandidates
-      .map((c) => c.D_brain)
+    const scores = iterations
+      .map((it) => it.cost?.global_score ?? null)
       .filter((v): v is number => v !== null);
-    const candidates = [...scored];
-    if (nullMedian !== null) candidates.push(nullMedian);
-    if (noiseFloor !== null) candidates.push(noiseFloor);
-    const max = candidates.length > 0 ? Math.max(...candidates) : 1;
+    const max = scores.length > 0 ? Math.max(...scores) : 1;
     return max * 1.15;
-  }, [allCandidates, nullMedian, noiseFloor]);
+  }, [iterations]);
 
   const convergencePoints: ConvergencePoint[] = useMemo(() => {
-    const sorted = [...generations].sort((a, b) => a.generation_index - b.generation_index);
+    const sorted = [...iterations].sort((a, b) => a.iteration_index - b.iteration_index);
     const result: ConvergencePoint[] = [];
-    for (const g of sorted) {
-      const genMin = g.candidates.reduce<number | null>((acc, c) => {
-        if (c.D_brain === null) return acc;
-        if (acc === null || c.D_brain < acc) return c.D_brain;
-        return acc;
-      }, null);
-      const prevBest = result.length > 0 ? result[result.length - 1].bestSoFar : null;
-      const bestSoFar =
-        genMin === null ? prevBest : prevBest === null ? genMin : Math.min(prevBest, genMin);
-      result.push({
-        generationIndex: g.generation_index,
-        bestSoFar,
-        meanDBrain: g.mean_D_brain,
-      });
+    let runningBest: number | null = null;
+    for (const it of sorted) {
+      const score = it.cost?.global_score ?? null;
+      if (score !== null) {
+        runningBest = runningBest === null ? score : Math.min(runningBest, score);
+      }
+      result.push({ iterationIndex: it.iteration_index, bestSoFar: runningBest, score });
     }
     return result;
-  }, [generations]);
+  }, [iterations]);
 
-  const reversedGenerations = useMemo(
-    () => [...generations].sort((a, b) => b.generation_index - a.generation_index),
-    [generations]
+  const reversedIterations = useMemo(
+    () => [...iterations].sort((a, b) => b.iteration_index - a.iteration_index),
+    [iterations]
   );
 
   if (initialLoading) {
@@ -213,10 +187,10 @@ export default function RunPage() {
         </Link>
       )}
 
-      {staleOnLoad && generations.length === 0 && (
+      {staleOnLoad && iterations.length === 0 && (
         <p className="mb-8 rounded-md border border-white/10 bg-[var(--surface-1)] px-4 py-3 text-sm text-[var(--text-secondary)]">
           This job already reached a terminal state before this page connected,
-          so per-generation history isn&apos;t available to replay here (the
+          so per-iteration history isn&apos;t available to replay here (the
           live event stream doesn&apos;t retain history across reconnects).
           {status === "done" ? " See the final result below." : ""}
         </p>
@@ -224,44 +198,32 @@ export default function RunPage() {
 
       {bestOverall && (
         <div className="mb-10">
-          <BestPanel
-            jobId={jobId}
-            best={bestOverall}
-            bestGenerationIndex={bestGenerationIndex ?? doneResult?.n_generations ?? 0}
-            domainMax={domainMax}
-            nullMedian={nullMedian}
-            noiseFloor={noiseFloor}
-          />
+          <BestPanel jobId={jobId} best={bestOverall} domainMax={domainMax} />
         </div>
       )}
 
       {convergencePoints.length > 0 && (
         <section className="mb-10 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">
           <h2 className="mb-4 text-sm font-semibold text-white">Convergence</h2>
-          <ConvergenceChart points={convergencePoints} nullMedian={nullMedian} noiseFloor={noiseFloor} />
+          <ConvergenceChart points={convergencePoints} />
         </section>
       )}
 
-      {generations.length > 0 && (
+      {iterations.length > 0 && (
         <section className="mb-10 rounded-lg border border-white/10 bg-[var(--surface-1)] p-5">
           <h2 className="mb-4 text-sm font-semibold text-white">Reasoning log</h2>
-          <HypothesisLog generations={generations} />
+          <HypothesisLog iterations={iterations} />
         </section>
       )}
 
-      <div className="space-y-10">
-        {reversedGenerations.map((g) => (
-          <GenerationRow
-            key={g.generation_index}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {reversedIterations.map((it) => (
+          <IterationCard
+            key={it.iteration_index}
             jobId={jobId}
-            generationIndex={g.generation_index}
-            candidates={g.candidates}
-            meanDBrain={g.mean_D_brain}
-            elapsedS={g.elapsed_s}
+            iteration={it}
             domainMax={domainMax}
-            nullMedian={nullMedian}
-            noiseFloor={noiseFloor}
-            bestCandidateAudioPath={bestOverall?.audio_path}
+            bestSoFar={bestOverall?.cost?.global_score ?? null}
           />
         ))}
       </div>
@@ -269,9 +231,9 @@ export default function RunPage() {
       {status === "done" && doneResult && (
         <section className="mt-10 rounded-lg border border-[var(--status-good)]/40 bg-[var(--status-good)]/5 p-5 text-sm text-[var(--text-secondary)]">
           <p className="text-white">
-            Converged after {doneResult.n_generations} generation
-            {doneResult.n_generations === 1 ? "" : "s"}. Noise floor {fmtNum(doneResult.noise_floor)},
-            random-pair median {fmtNum(doneResult.null_median)}.
+            Converged after {doneResult.n_iterations} iteration
+            {doneResult.n_iterations === 1 ? "" : "s"}
+            {doneResult.best?.cost ? ` — best score ${fmtNum(doneResult.best.cost.global_score)}.` : "."}
           </p>
           <Link href={`/run/${jobId}/result`} className="mt-2 inline-block text-[var(--accent)] underline">
             View the full result →

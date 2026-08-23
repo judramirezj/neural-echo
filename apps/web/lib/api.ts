@@ -7,8 +7,7 @@ export interface CreateJobParams {
   constraintText: string;
   youtubeUrl?: string;
   file?: File;
-  maxGenerations: number;
-  batchSize: number;
+  maxIterations: number;
   adherenceTau?: number;
   dryRun?: boolean;
 }
@@ -19,8 +18,7 @@ export async function createJob(params: CreateJobParams): Promise<{ job_id: stri
   if (params.youtubeUrl) form.set("youtube_url", params.youtubeUrl);
   if (params.file) form.set("file", params.file);
   form.set("dry_run", String(params.dryRun ?? false));
-  form.set("batch_size", String(params.batchSize));
-  form.set("max_generations", String(params.maxGenerations));
+  form.set("max_iterations", String(params.maxIterations));
   if (params.adherenceTau !== undefined) {
     form.set("adherence_tau", String(params.adherenceTau));
   }

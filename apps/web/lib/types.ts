@@ -1,8 +1,4 @@
 // Types mirror services/api/main.py and services/api/jobs.py exactly.
-// Where the written API spec disagreed with the actual backend source
-// (neural_echo/generator.py), the source wins — see Chunk.context_adherence.
-
-export type DynamicArc = "flat" | "crescendo" | "peak_and_fall" | "multi_peak";
 
 export interface Chunk {
   text: string;
@@ -16,17 +12,36 @@ export interface Chunk {
 }
 
 export interface Genome {
-  bpm: number;
-  key_mode: string;
-  instrumentation: string[];
-  texture_density: number;
-  dynamic_arc: DynamicArc;
-  vocal_presence: boolean;
-  brightness: number;
-  space_reverb: number;
-  section_count: number;
   chunks: Chunk[];
-  rationale: string;
+}
+
+export interface RegionScore {
+  region: string;
+  distance: number;
+  arc_correlation: number;
+  score: number;
+}
+
+export interface WindowSummary {
+  window_index: number;
+  rms_error: number;
+  mean_bias: number;
+}
+
+export interface WorstCell {
+  window_index: number;
+  region: string;
+  candidate: number;
+  target: number;
+  difference: number;
+}
+
+export interface CostResult {
+  global_score: number; // lower is better
+  regions: RegionScore[];
+  windows: WindowSummary[];
+  worst_cell: WorstCell;
+  laterality: Record<string, number>;
 }
 
 export type RejectedReason =
@@ -35,29 +50,27 @@ export type RejectedReason =
   | "constraint_not_met"
   | null;
 
-export interface Candidate {
-  genome: Genome;
+export interface IterationResult {
+  iteration_index: number;
+  reasoning: string;
+  changes_summary: string;
+  plan: Genome;
+  seed: number;
   audio_path: string | null;
-  D_brain: number | null;
-  percentile: number | null;
-  d_spatial: number | null;
-  d_dynamics: number | null;
-  d_geometry: number | null;
+  is_best: boolean;
+  elapsed_s: number;
+  cost: CostResult | null;
+  rejected_reason: RejectedReason;
   adherence: number | null;
   novelty_audio_sim: number | null;
   is_near_cover: boolean | null;
-  passed_constraint: boolean;
-  rejected_reason: RejectedReason;
-  per_network_deltas: Record<string, number>;
 }
 
 export type JobStatusValue = "pending" | "preparing" | "running" | "done" | "error";
 
 export interface JobResult {
-  best: Candidate | null;
-  n_generations: number;
-  noise_floor: number;
-  null_median: number;
+  best: IterationResult | null;
+  n_iterations: number;
   reference_analysis: Record<string, unknown>;
 }
 
@@ -65,7 +78,7 @@ export interface JobStatusDict {
   id: string;
   status: JobStatusValue;
   error: string | null;
-  n_generations: number;
+  n_iterations: number;
   constraint_text: string;
   dry_run: boolean;
 }
@@ -74,15 +87,8 @@ export interface JobDetail extends JobStatusDict {
   result: JobResult | null;
 }
 
-export interface GenerationCompleteEvent {
-  type: "generation_complete";
-  generation_index: number;
-  hypothesis: string;
-  learned_insights: string;
-  candidates: Candidate[];
-  best: Candidate | null;
-  mean_D_brain: number | null;
-  elapsed_s: number;
+export interface IterationCompleteEvent extends IterationResult {
+  type: "iteration_complete";
 }
 
 export interface StatusEvent {
@@ -106,12 +112,12 @@ export interface ErrorEvent {
 export type JobStreamMessage =
   | JobStatusDict
   | StatusEvent
-  | GenerationCompleteEvent
+  | IterationCompleteEvent
   | DoneEvent
   | ErrorEvent;
 
 export function isTaggedEvent(
   msg: JobStreamMessage
-): msg is StatusEvent | GenerationCompleteEvent | DoneEvent | ErrorEvent {
+): msg is StatusEvent | IterationCompleteEvent | DoneEvent | ErrorEvent {
   return "type" in msg;
 }

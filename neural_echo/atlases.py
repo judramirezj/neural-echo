@@ -1,8 +1,12 @@
-"""fsaverage5 surface masks: anatomical (audio-relevant cortex) and network
-(Yeo-7) parcellations, used by metric.py. Fetched once, cached to disk by
-nilearn's own data dir so subsequent runs are instant and offline-safe.
+"""fsaverage5 surface parcellation used by metric.py: groups the Destrieux
+(aparc.a2009s) atlas's fine-grained labels into ~25 coarser anatomical
+lobule groups, per hemisphere, so metric.py can compare candidate vs.
+reference brain responses region-by-region rather than vertex-by-vertex.
+Fetched once, cached to disk by nilearn's own data dir so subsequent runs
+are instant and offline-safe.
 """
 import logging
+from functools import lru_cache
 
 import numpy as np
 
@@ -11,87 +15,70 @@ logger = logging.getLogger(__name__)
 N_VERTICES_PER_HEMI = 10242
 N_VERTICES = 2 * N_VERTICES_PER_HEMI
 
-# Destrieux (aparc.a2009s) label substrings covering primary/secondary auditory
-# cortex, superior temporal sulcus, inferior frontal gyrus (language), and
-# insula (salience) — the brief's "Heschl's, planum temporale, STS, IFG, insula"
-# list. Matched case-sensitively against nilearn's fetch_atlas_surf_destrieux
-# label names (e.g. "G_temp_sup-G_T_transv", "S_temporal_sup", ...).
-AUDIO_RELEVANT_DESTRIEUX_SUBSTRINGS = [
-    "G_temp_sup",       # superior temporal gyrus (incl. Heschl's, planum temporale)
-    "S_temporal_sup",   # superior temporal sulcus
-    "Lat_Fis-post",     # posterior lateral fissure (near planum temporale)
-    "G_front_inf",       # inferior frontal gyrus (Broca's area / IFG)
-    "G_Ins_lg",          # long insular gyrus
-    "G_insular_short",   # short insular gyri
-    "S_circular_insula",  # circular sulcus of the insula
+# Groups Destrieux (aparc.a2009s) labels into coarser anatomical lobules by
+# substring match on the label name. Order matters: the first matching group
+# wins, so more specific groups should precede more general ones where their
+# substrings could otherwise overlap.
+LOBULE_RULES = [
+    ("auditory_primary", ["temp_sup-g_t_transv", "s_temporal_transverse"]),
+    ("auditory_assoc", ["temp_sup-plan_tempo", "temp_sup-plan_polar", "temp_sup-lateral", "s_temporal_sup"]),
+    ("temporal_mid", ["temporal_middle", "s_temporal_inf"]),
+    ("temporal_inferior", ["temporal_inf", "oc-temp_lat-fusifor", "s_oc-temp_lat"]),
+    ("temporal_pole", ["pole_temporal", "temporal_transverse_pole"]),
+    ("parahippocampal", ["oc-temp_med-parahip", "oc-temp_med-lingual", "s_oc-temp_med", "s_collat_transv"]),
+    ("frontal_inferior", ["front_inf", "s_front_inf", "triangul", "opercular", "orbital"]),
+    ("frontal_mid", ["front_middle", "s_front_middle"]),
+    ("frontal_superior", ["front_sup", "s_front_sup"]),
+    ("motor_premotor", ["precentral", "s_precentral"]),
+    ("orbitofrontal", ["rectus", "orbital-h_shaped", "orbital_lateral", "orbital_medial", "subcallosal"]),
+    ("somatosensory", ["postcentral", "s_postcentral"]),
+    ("parietal_superior", ["parietal_sup", "s_parieto_occipital"]),
+    ("parietal_inferior", ["pariet_inf", "angular", "supramar", "s_intrapariet"]),
+    ("precuneus", ["precuneus", "subparietal"]),
+    ("visual_primary", ["calcarine", "cuneus"]),
+    ("visual_assoc", ["occip", "lingual", "s_oc_middle", "s_oc_sup", "s_calcarine"]),
+    ("insula_anterior", ["ins_lg_and_s_cent", "s_circular_insula_ant", "s_circular_insula_sup"]),
+    ("insula_posterior", ["insular", "s_circular_insula_inf"]),
+    ("cingulate_anterior", ["cingul-ant", "s_cingul-marginalis", "pericallosal"]),
+    ("cingulate_mid", ["cingul-mid-ant", "cingul-mid-post"]),
+    ("cingulate_posterior", ["cingul-post"]),
+    ("sylvian", ["lat_fis"]),
+    ("central", ["s_central", "s_interm_prim"]),
+    ("motor_medial", ["paracentral", "subcentral"]),
+    ("prefrontal_polar", ["frontomargin", "transv_frontopol"]),
 ]
 
 
-def fetch_anatomical_mask() -> np.ndarray:
-    """Boolean mask over N_VERTICES (both hemispheres) selecting Destrieux
-    ROIs relevant to audio/language/salience processing.
+def classify_label(name: str) -> str:
+    n = name.lower()
+    if "medial_wall" in n or "unknown" in n:
+        return "exclude"
+    for group, substrings in LOBULE_RULES:
+        if any(s in n for s in substrings):
+            return group
+    return "other"
+
+
+@lru_cache(maxsize=1)
+def build_lobule_regions() -> dict[str, np.ndarray]:
+    """Destrieux labels -> {"{group}_left"/"{group}_right": vertex_indices}
+    over all N_VERTICES (both hemispheres, right offset by N_VERTICES_PER_HEMI).
     """
     from nilearn import datasets
 
-    destrieux = datasets.fetch_atlas_surf_destrieux()
-    labels = [lbl.decode() if isinstance(lbl, bytes) else lbl for lbl in destrieux.labels]
-    keep_label_ids = {
-        i for i, lbl in enumerate(labels)
-        if any(sub in lbl for sub in AUDIO_RELEVANT_DESTRIEUX_SUBSTRINGS)
-    }
-    if not keep_label_ids:
-        raise RuntimeError("No Destrieux labels matched the audio-relevant substrings")
+    atlas = datasets.fetch_atlas_surf_destrieux()
+    labels = [lbl.decode() if isinstance(lbl, bytes) else str(lbl) for lbl in atlas["labels"]]
 
-    map_left = np.asarray(destrieux.map_left)
-    map_right = np.asarray(destrieux.map_right)
-    mask_left = np.isin(map_left, list(keep_label_ids))
-    mask_right = np.isin(map_right, list(keep_label_ids))
-    mask = np.concatenate([mask_left, mask_right])
-    if mask.shape[0] != N_VERTICES:
-        raise RuntimeError(
-            f"Destrieux mask has {mask.shape[0]} vertices, expected {N_VERTICES} "
-            "(fsaverage5 mismatch)"
-        )
-    logger.info("Anatomical mask: %d / %d vertices", mask.sum(), N_VERTICES)
-    return mask
+    regions: dict[str, list[np.ndarray]] = {}
+    for hemi, map_key, offset in [("left", "map_left", 0), ("right", "map_right", N_VERTICES_PER_HEMI)]:
+        hemi_map = np.asarray(atlas[map_key])
+        for label_id, name in enumerate(labels):
+            group = classify_label(name)
+            if group == "exclude":
+                continue
+            idx = np.where(hemi_map == label_id)[0]
+            if idx.size == 0:
+                continue
+            regions.setdefault(f"{group}_{hemi}", []).append(idx + offset)
 
-
-_YEO_NETWORK_NAMES = [
-    "Visual", "Somatomotor", "DorsalAttention", "VentralAttention",
-    "Limbic", "Frontoparietal", "Default",
-]
-
-
-def fetch_yeo7_network_labels() -> np.ndarray | None:
-    """Per-vertex Yeo-7 network id (1..7, 0=unlabeled) over N_VERTICES, or
-    None if the atlas can't be fetched (e.g. no network access) — callers
-    should fall back to the anatomical mask alone for network geometry.
-    """
-    try:
-        from nilearn import datasets, surface
-
-        yeo = datasets.fetch_atlas_yeo_2011(n_networks=7, thickness="thick")
-        fsaverage = datasets.fetch_surf_fsaverage("fsaverage5")
-        left = surface.vol_to_surf(
-            yeo.maps if hasattr(yeo, "maps") else yeo["thick_7"],
-            fsaverage.pial_left,
-            interpolation="nearest_most_frequent",
-        )
-        right = surface.vol_to_surf(
-            yeo.maps if hasattr(yeo, "maps") else yeo["thick_7"],
-            fsaverage.pial_right,
-            interpolation="nearest_most_frequent",
-        )
-        labels = np.concatenate([np.ravel(left), np.ravel(right)]).round().astype(int)
-        if labels.shape[0] != N_VERTICES:
-            raise RuntimeError(f"Yeo projection has {labels.shape[0]} vertices, expected {N_VERTICES}")
-        return labels
-    except Exception:
-        logger.warning("Could not fetch/project Yeo-7 atlas; network geometry will use anatomical sub-ROIs only", exc_info=True)
-        return None
-
-
-def network_name(network_id: int) -> str:
-    if 1 <= network_id <= len(_YEO_NETWORK_NAMES):
-        return _YEO_NETWORK_NAMES[network_id - 1]
-    return "Unlabeled"
+    return {k: np.concatenate(v) for k, v in regions.items()}

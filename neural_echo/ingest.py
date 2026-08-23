@@ -1,8 +1,8 @@
 """Turn a YouTube URL or uploaded file into a normalized 45s reference clip.
 
-Normalization matters more than it looks (see metric.py docstring / brief §3
-step 0): loudness and sample rate differences would otherwise dominate the
-brain-distance metric before any musical content does.
+Normalization matters more than it looks: loudness and sample rate
+differences would otherwise dominate TRIBE's predictions before any musical
+content does, which would swamp metric.py's region-by-region comparison.
 """
 import subprocess
 import sys
@@ -120,20 +120,4 @@ def generate_silence(out_path: Path, duration_s: float = DEFAULT_WINDOW_S, sr: i
     audio = np.zeros(int(duration_s * sr), dtype=np.float32)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), audio, sr, subtype="FLOAT")
-    return out_path
-
-
-def generate_pink_noise(out_path: Path, duration_s: float = DEFAULT_WINDOW_S, sr: int = TARGET_SR, seed: int = 0) -> Path:
-    """1/f pink noise via spectral shaping of white noise — used as a baseline
-    stimulus for calibration.subtract_baseline (brief §3 step 0b)."""
-    rng = np.random.default_rng(seed)
-    n = int(duration_s * sr)
-    white = rng.standard_normal(n)
-    freqs = np.fft.rfftfreq(n, d=1.0 / sr)
-    freqs[0] = freqs[1]  # avoid div by zero at DC
-    spectrum = np.fft.rfft(white) / np.sqrt(freqs)
-    pink = np.fft.irfft(spectrum, n=n)
-    pink = pink / (np.max(np.abs(pink)) + 1e-9) * 0.5
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(out_path), pink.astype(np.float32), sr, subtype="FLOAT")
     return out_path

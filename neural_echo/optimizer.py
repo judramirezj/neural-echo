@@ -1,104 +1,198 @@
-"""The closed-loop optimizer (brief §4): LLM proposes a batch of genomes ->
-ElevenLabs renders them -> TRIBE scores them against the reference -> the LLM
-sees full diagnostics (including CLAP adherence/novelty rejections) and
-writes a hypothesis + the next batch. Runs until budget/generation cap,
-plateau, or within 15% of the noise floor.
+"""The closed-loop optimizer: a single-lineage LangGraph loop that mutates
+one composition plan iteration by iteration — LLM proposes a plan ->
+ElevenLabs renders it -> TRIBE scores it against the reference via
+metric.compute_cost -> the LLM sees the full region x window diagnostic
+matrix and writes a next plan. Runs until a success threshold, a patience
+budget, or a max-iteration cap.
 
-Every generation's LLM hypothesis is captured as a first-class field on
-GenerationResult specifically so callers (the API's SSE stream, the UI) can
-surface "the reasoning log" live — per the product brief this is what makes
-the optimizer legible rather than a black box, and it is never dropped or
-summarized away between here and the frontend.
+This mirrors daniel_algorithm.ipynb's pipeline_e2e.py algorithm (region-
+parcellated, time-windowed cost; two-phase prompting; retry/reformulate on
+ElevenLabs rejection; layered memory compression; seed control) with two
+additions the notebook doesn't have: the user's creative constraint and a
+novelty ("not a near-cover of the reference") hard filter, both reused from
+analysis.py and enforced the same way the notebook already handles ToS
+rejections — ask the LLM to reformulate, then retry, rather than blending
+them into the score.
+
+Every iteration's `reasoning`/`changes_summary` are first-class fields on
+IterationResult specifically so callers (the API's SSE stream, the UI) can
+surface "the reasoning log" live — this is what makes the optimizer legible
+rather than a black box, and it is never dropped or summarized away between
+here and the frontend.
 """
 import json
 import logging
+import random
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
-import anthropic
+import numpy as np
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langgraph.graph import END, StateGraph
 
-from . import analysis, calibration, compat
+from . import analysis, atlases, compat, metric
 from .generator import ElevenLabsGenerator, Genome, repair_genome
 
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "claude-sonnet-5"
-MAX_GENERATIONS_DEFAULT = 6
-BATCH_SIZE_DEFAULT = 10
-PLATEAU_GENERATIONS = 2
-FLOOR_PROXIMITY_STOP = 1.15  # stop once within 15% of (D_brain - floor) -> floor
+MAX_ITERATIONS_DEFAULT = 10
+SUCCESS_THRESHOLD = 0.15          # stop once best_score beats this (lower is better)
+PATIENCE = 3                      # stop after this many iterations without improvement
+DETAIL_ITERATIONS = 3             # most recent iterations kept in full detail in `messages`
+SUMMARIZE_TOKEN_THRESHOLD = 40_000
+MAX_REFORMULATION_ATTEMPTS = 3    # bounded retries when ElevenLabs rejects a plan outright
+
+CONTENT_POLICY_MARKERS = ("bad_composition_plan", "Terms of Service")
+
+SYSTEM_PROMPT_TEMPLATE = """You are a professional audio director working with ElevenLabs Music v2.
+You iteratively optimize a composition plan to minimize the global cost between a candidate
+track and a brain-response benchmark (fMRI activity predicted by Meta's TRIBE v2 model from a
+reference track), while satisfying the user's creative constraint.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHY THE INITIAL PLAN IS NOISY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A prompt answers five questions whether you address them or not: genre, mood, instrumentation,
+tempo, and production era. Any dimension you leave open, ElevenLabs fills with "the most
+statistically average choice" — which varies between generations and makes it impossible to
+attribute score changes to your prompt vs. randomness.
+
+Studio vocabulary moves real levers. The model respects exact numbers (BPM, Hz, dB, ms). Vague
+adjectives (energetic, dark, powerful) have weak effect.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR STRATEGY, BY PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PHASE 1 (iterations 1-3): RAISE SPECIFICITY
+The initial plan is generic. Before changing direction, densify the existing plan by covering
+all five dimensions with concrete technical vocabulary:
+  - Genre: specific subgenre, not a broad label
+  - Mood: concrete, compound descriptors
+  - Instrumentation: specific generic instrument/synth type (never a brand or model name)
+  - Tempo: exact BPM
+  - Production era: decade + mixing school
+You can also add production terminology: sidechain compression, parallel bus, plate reverb,
+tape saturation, mid/side EQ, transient shaping, stereo width, headroom, integrated LUFS.
+Goal of this phase: reduce variance, not change direction yet.
+
+PHASE 2 (iteration 4+): OPTIMIZE DIRECTION
+With the plan already specific, start moving parameters directed at the cost diagnostics.
+Change 1-2 aspects per iteration so you can attribute the effect. If a change made the score
+worse, revert and try another direction.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIELDS YOU CONTROL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Per chunk:
+  - text: section description; you can use inline {{braces}} for timing markers like
+    "{{0:15 sub bass enters}}"
+  - duration_ms: {min_chunk_ms}-{max_chunk_ms} (split chunks to introduce structure)
+  - positive_styles: up to 12 terms. Prioritize TECHNICAL terms over adjectives.
+  - negative_styles: up to 12 terms. Block cross-contamination.
+  - context_adherence: "low" | "medium" | "high" | "xhigh" (how strongly this chunk sticks to
+    the context of the preceding ones)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESTRICTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Hard (never violate):
+  - Never use proper nouns with copyright: artists, bands, songs, films, or branded
+    instrument/synth/drum-machine names. ElevenLabs automatically rejects a plan that contains
+    them. Example: NOT "Juno-60 pad" -> "warm analog polysynth pad"; NOT "TR-909 kick" ->
+    "punchy analog drum machine kick". You may name genres and eras/decades, never brands or
+    people.
+  - The user's creative constraint below must be clearly satisfied:
+    "{constraint_text}"
+
+Soft (respect for coherence):
+  - Stay within the same creative direction across iterations unless a hypothesis calls for a
+    deliberate change — you're refining, not restarting from scratch every iteration.
+  - Total plan duration should stay close to the reference's duration ({target_duration_ms}ms).
+    Don't compress a long arc into a short one — that destroys the temporal dynamics the
+    benchmark captures.
+  - You may (and often should) split the plan into several chunks to represent structure:
+    intro, build, drop, sustain, breakdown, outro. Each chunk between {min_chunk_ms}-
+    {max_chunk_ms}ms; total plan up to {max_total_ms}ms.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO REASON ABOUT THE BRAIN-COST MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  - The matrix shows {n_windows} time windows x ~50 anatomical regions. Each cell: candidate /
+    target / difference. Lower per-region score is better (it's distance + (1 - arc
+    correlation) between the candidate's and the reference's temporal arc in that region).
+  - You may use general neuroscience intuition ONLY to prioritize what to try first (e.g.
+    auditory cortices process timbre; motor areas respond to rhythm).
+  - The only source of truth is next iteration's matrix. Never invent precise causal claims
+    ("raising the hi-hat activates the right parietal lobe") — there's no literature backing
+    that specificity.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE FORMAT (mandatory, ONLY valid JSON, no extra text)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{
+  "reasoning": "1-2 sentences: what you observed, what phase you're in, what you're trying",
+  "changes_summary": "brief description of what you changed vs. the previous plan",
+  "plan": {{ ...full composition plan (chunks)... }},
+  "change_seed": false
+}}
+
+change_seed:
+  - false by default (keeps the seed fixed for clean attribution)
+  - true ONLY if you've had {patience}+ iterations without improvement and already tried
+    significant prompt changes. Explain why in "reasoning"."""
 
 
-GENOME_JSON_SCHEMA = Genome.model_json_schema()
-# Claude tool schemas are self-contained; inline pydantic's $defs so the
-# schema doesn't reference external $refs the API can't resolve.
-if "$defs" in GENOME_JSON_SCHEMA:
-    _defs = GENOME_JSON_SCHEMA.pop("$defs")
-
-    def _inline(node):
-        if isinstance(node, dict):
-            if "$ref" in node:
-                ref_name = node["$ref"].split("/")[-1]
-                return _inline(_defs[ref_name])
-            return {k: _inline(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [_inline(v) for v in node]
-        return node
-
-    GENOME_JSON_SCHEMA = _inline(GENOME_JSON_SCHEMA)
-
-PROPOSE_GENOMES_TOOL = {
-    "name": "propose_genomes",
-    "description": "Propose a batch of song genomes (ElevenLabs Music v2 composition plans plus global knobs).",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "hypothesis": {
-                "type": "string",
-                "description": "1-3 sentences: what you believe is driving the scores so far, and why this batch is designed the way it is. Written for a human watching the run live.",
-            },
-            "learned_insights": {
-                "type": "string",
-                "description": "Persistent notes carried forward to the next generation — accumulate, don't just repeat.",
-            },
-            "genomes": {
-                "type": "array",
-                "items": GENOME_JSON_SCHEMA,
-            },
-        },
-        "required": ["hypothesis", "learned_insights", "genomes"],
-    },
-}
+def parse_llm_json(text: str) -> dict:
+    """Best-effort JSON parse tolerating ```json ... ``` fences the LLM sometimes wraps
+    its response in."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        text = text.removeprefix("json")
+        text = text.strip()
+    return json.loads(text)
 
 
 @dataclass
-class CandidateResult:
-    genome: Genome
-    audio_path: str
-    D_brain: float | None = None
-    percentile: float | None = None
-    d_spatial: float | None = None
-    d_dynamics: float | None = None
-    d_geometry: float | None = None
+class IterationResult:
+    iteration_index: int
+    reasoning: str
+    changes_summary: str
+    plan: Genome
+    seed: int
+    audio_path: str | None
+    is_best: bool
+    elapsed_s: float
+    cost: metric.CostResult | None = None
+    rejected_reason: str | None = None  # "generation_failed" | "near_cover" | "constraint_not_met"
     adherence: float | None = None
     novelty_audio_sim: float | None = None
     is_near_cover: bool | None = None
-    passed_constraint: bool = False
-    rejected_reason: str | None = None
-    per_network_deltas: dict = field(default_factory=dict)
 
 
-@dataclass
-class GenerationResult:
-    generation_index: int
-    hypothesis: str
-    learned_insights: str
-    candidates: list[CandidateResult]
-    best: CandidateResult | None
-    mean_D_brain: float | None
-    elapsed_s: float
+class OptimizerState(TypedDict):
+    plan: dict                       # {"chunks": [...]}, JSON-serializable Genome
+    seed: int
+    iteration: int
+    benchmark_preds: np.ndarray
+    best_score: float
+    best_iteration: int | None
+    best_plan: dict | None
+    best_audio_path: str | None
+    iterations_without_improvement: int
+    messages: list[BaseMessage]
+    memory_summary: str
 
 
 class OptimizerRun:
@@ -108,315 +202,408 @@ class OptimizerRun:
         self,
         reference_audio_path: str,
         constraint_text: str,
-        bundle: calibration.CalibrationBundle,
         db_path: Path,
         dry_run: bool = False,
         stub_clips_dir: Path | None = None,
-        batch_size: int = BATCH_SIZE_DEFAULT,
-        max_generations: int = MAX_GENERATIONS_DEFAULT,
+        max_iterations: int = MAX_ITERATIONS_DEFAULT,
         adherence_tau: float = 0.15,
-        anthropic_client: anthropic.Anthropic | None = None,
-        on_generation=None,  # optional callback(GenerationResult) for live SSE streaming
+        llm: ChatAnthropic | None = None,
+        on_iteration=None,  # optional callback(IterationResult) for live SSE streaming
     ):
         self.reference_audio_path = reference_audio_path
         self.constraint_text = constraint_text
-        self.bundle = bundle
-        self.batch_size = batch_size
-        self.max_generations = max_generations
+        self.max_iterations = max_iterations
         self.adherence_tau = adherence_tau
-        self.on_generation = on_generation
+        self.on_iteration = on_iteration
 
         self.model = compat.get_tribe_model()
-        self.client = anthropic_client or anthropic.Anthropic()
+        self.llm = llm or ChatAnthropic(model=MODEL_ID, max_tokens=4000)
         self.generator = ElevenLabsGenerator(
             output_dir=Path("data/generated"), dry_run=dry_run, stub_clips_dir=stub_clips_dir,
         )
+        self.regions = atlases.build_lobule_regions()
 
         self.db_path = db_path
         self._init_db()
 
         self.reference_analysis = analysis.analyze_reference(reference_audio_path)
-        # Computed ONCE and reused for every candidate in every generation —
-        # see FINDINGS.md §8: the naive per-candidate helper recomputes the
-        # reference's TRIBE pass every time, doubling cost for nothing.
-        self.reference_profile = calibration.compute_profile_for_clip(
-            self.model, bundle, Path(reference_audio_path)
-        )
         self.reference_clap_embedding = analysis.clap_audio_embedding(reference_audio_path)
 
-        self.history: list[GenerationResult] = []
-        self.learned_insights = ""
-        self.elite: list[CandidateResult] = []
+        self.history: list[IterationResult] = []
+        # Set by _node_propose_next_plan for the iteration it just produced a plan
+        # for; consumed by the following _node_generate_and_score call.
+        self._pending_reasoning = ""
+        self._pending_changes_summary = "Initial plan built from reference audio analysis."
+        self.graph = self._build_graph()
 
     def _init_db(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS generations (
+            CREATE TABLE IF NOT EXISTS iterations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                generation_index INTEGER,
-                hypothesis TEXT,
-                learned_insights TEXT,
-                created_at REAL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS candidates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                generation_index INTEGER,
-                audio_hash TEXT,
-                genome_json TEXT,
+                iteration_index INTEGER,
+                reasoning TEXT,
+                changes_summary TEXT,
+                plan_json TEXT,
+                seed INTEGER,
                 audio_path TEXT,
-                D_brain REAL,
-                percentile REAL,
-                d_spatial REAL,
-                d_dynamics REAL,
-                d_geometry REAL,
+                is_best INTEGER,
+                elapsed_s REAL,
+                global_score REAL,
+                rejected_reason TEXT,
                 adherence REAL,
                 novelty_audio_sim REAL,
-                is_near_cover INTEGER,
-                passed_constraint INTEGER,
-                rejected_reason TEXT,
                 created_at REAL
             )
         """)
         conn.commit()
         conn.close()
 
-    def _log_generation(self, gen: GenerationResult):
+    def _log_iteration(self, r: IterationResult):
         conn = sqlite3.connect(self.db_path)
         conn.execute(
-            "INSERT INTO generations (generation_index, hypothesis, learned_insights, created_at) VALUES (?,?,?,?)",
-            (gen.generation_index, gen.hypothesis, gen.learned_insights, time.time()),
+            """INSERT INTO iterations
+            (iteration_index, reasoning, changes_summary, plan_json, seed, audio_path, is_best,
+             elapsed_s, global_score, rejected_reason, adherence, novelty_audio_sim, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                r.iteration_index, r.reasoning, r.changes_summary, r.plan.model_dump_json(), r.seed,
+                r.audio_path, int(r.is_best), r.elapsed_s, r.cost.global_score if r.cost else None,
+                r.rejected_reason, r.adherence, r.novelty_audio_sim, time.time(),
+            ),
         )
-        for c in gen.candidates:
-            conn.execute(
-                """INSERT INTO candidates
-                (generation_index, audio_hash, genome_json, audio_path, D_brain, percentile,
-                 d_spatial, d_dynamics, d_geometry, adherence, novelty_audio_sim, is_near_cover,
-                 passed_constraint, rejected_reason, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    gen.generation_index, c.genome.content_hash(), c.genome.model_dump_json(), c.audio_path,
-                    c.D_brain, c.percentile, c.d_spatial, c.d_dynamics, c.d_geometry, c.adherence,
-                    c.novelty_audio_sim, int(bool(c.is_near_cover)), int(c.passed_constraint),
-                    c.rejected_reason, time.time(),
-                ),
-            )
         conn.commit()
         conn.close()
 
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> dict:
-        response = self.client.messages.create(
-            model=MODEL_ID,
-            max_tokens=16000,
-            system=system_prompt,
-            tools=[PROPOSE_GENOMES_TOOL],
-            tool_choice={"type": "tool", "name": "propose_genomes"},
-            messages=[{"role": "user", "content": user_prompt}],
+    def _system_prompt(self, iteration: int) -> str:
+        from .generator import MAX_CHUNK_S, MAX_TOTAL_S, MIN_CHUNK_S
+
+        target_duration_ms = int(self.reference_analysis["duration_s"] * 1000)
+        return SYSTEM_PROMPT_TEMPLATE.format(
+            constraint_text=self.constraint_text,
+            target_duration_ms=target_duration_ms,
+            min_chunk_ms=MIN_CHUNK_S * 1000,
+            max_chunk_ms=MAX_CHUNK_S * 1000,
+            max_total_ms=MAX_TOTAL_S * 1000,
+            n_windows=metric.N_TIME_WINDOWS,
+            patience=PATIENCE,
         )
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "propose_genomes":
-                return block.input
-        raise RuntimeError("LLM did not return a propose_genomes tool call")
 
-    def _score_candidate(self, genome: Genome, audio_path: str) -> CandidateResult:
-        result = CandidateResult(genome=genome, audio_path=audio_path)
-        if not audio_path:
-            result.rejected_reason = "generation_failed"
-            return result
+    def _build_initial_plan(self) -> Genome:
+        target_duration_ms = int(self.reference_analysis["duration_s"] * 1000)
+        system = (
+            "You are an audio director. Build an ElevenLabs Music v2 composition plan aiming to "
+            "generate a track in the same sonic world as a reference track, described below by its "
+            "extracted audio features (not by listening to it directly), while satisfying the user's "
+            "creative constraint.\n\n"
+            "Rules:\n"
+            "- Never use proper nouns with copyright (artists, bands, songs, films, branded "
+            "instrument/synth/drum-machine names) — ElevenLabs rejects plans that contain them.\n"
+            "- Each chunk: 3000-120000ms. Total plan duration should approximate the target below.\n"
+            "- context_adherence: \"low\" | \"medium\" | \"high\" | \"xhigh\".\n"
+            "- Use concrete technical vocabulary (exact BPM, production techniques, specific generic "
+            "instrument types) — not vague adjectives.\n\n"
+            "Respond with ONLY the JSON plan, no extra text, in this shape:\n"
+            '{"chunks": [{"text": "[Intro/Build/Drop/Outro/...]", "duration_ms": <int>, '
+            '"positive_styles": ["..."], "negative_styles": ["..."], "context_adherence": "high"}, ...]}'
+        )
+        user = json.dumps({
+            "reference_track_analysis": self.reference_analysis,
+            "user_constraint": self.constraint_text,
+            "target_duration_ms": target_duration_ms,
+        }, indent=2)
+        response = self.llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+        parsed = parse_llm_json(response.content)
+        genome = repair_genome(parsed)
+        if genome is None:
+            raise RuntimeError(f"Initial plan failed validation and could not be repaired: {parsed}")
+        return genome
 
-        # Hard filters first (brief §5) — never blended into D_brain.
+    def _request_reformulation(self, messages: list[BaseMessage], plan: Genome, problem: str, iteration: int) -> Genome | None:
+        """Shared reformulation path for ElevenLabs ToS rejections, near-cover
+        candidates, and constraint-adherence failures: ask the LLM to revise the
+        SAME plan to fix the specific problem, then validate/repair the response.
+        Returns None if the LLM's revision can't be salvaged."""
+        context = [
+            SystemMessage(content=self._system_prompt(iteration=iteration)),
+            *messages,
+            HumanMessage(content=(
+                f"The plan you proposed was rejected:\n{plan.model_dump_json(indent=2)}\n\n"
+                f"Problem: {problem}\n\n"
+                "Revise the SAME plan (same direction, same goals) to fix this specific problem. "
+                "Respond with ONLY the usual JSON."
+            )),
+        ]
+        try:
+            response = self.llm.invoke(context)
+            parsed = parse_llm_json(response.content)
+            revised = repair_genome(parsed.get("plan", parsed))
+            if revised is None:
+                logger.warning("Reformulation response failed validation/repair: %s", parsed)
+            return revised
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Could not parse reformulation response: %s", e)
+            return None
+
+    @staticmethod
+    def _is_content_policy_error(message: str) -> bool:
+        return any(marker in message for marker in CONTENT_POLICY_MARKERS)
+
+    def _cost_message(self, plan: Genome, cost: metric.CostResult, iteration: int) -> str:
+        return (
+            f"Iteration {iteration} completed.\n"
+            f"Plan used:\n{plan.model_dump_json(indent=2)}\n\n"
+            f"Result:\n{metric.format_cost_for_llm(cost, iteration=iteration)}"
+        )
+
+    async def _node_generate_and_score(self, state: OptimizerState) -> dict:
+        n = state["iteration"]
+        genome = Genome.model_validate(state["plan"])
+        seed = state["seed"]
+        messages = state["messages"]
+        t0 = time.time()
+        reasoning, changes_summary = self._pending_reasoning, self._pending_changes_summary
+
+        logger.info("Iteration %d/%d starting (seed=%d)", n, self.max_iterations, seed)
+
+        audio_path = None
+        for attempt in range(1, MAX_REFORMULATION_ATTEMPTS + 1):
+            gen_result = await self.generator.generate_one(genome, seed=seed)
+            if not gen_result.error:
+                audio_path = gen_result.audio_path
+                break
+            if self._is_content_policy_error(gen_result.error) and attempt < MAX_REFORMULATION_ATTEMPTS:
+                logger.info("Iteration %d: ToS/copyright rejection, asking LLM to reformulate (attempt %d)", n, attempt)
+                revised = self._request_reformulation(
+                    messages, genome,
+                    f"ElevenLabs rejected this plan for a Terms of Service violation ('{gen_result.error}'). "
+                    "This almost always means the plan included a proper noun with copyright (an artist, "
+                    "song, film, or branded instrument/synth/drum-machine name). Replace any proper nouns "
+                    "with equivalent generic descriptions.",
+                    iteration=n,
+                )
+                if revised is None:
+                    break
+                genome = revised
+                continue
+            raise RuntimeError(f"Iteration {n}: ElevenLabs generation failed: {gen_result.error}")
+
+        if audio_path is None:
+            return self._rejection_update(state, genome, seed, "generation_failed", t0)
+
+        # Hard filters (never blended into the score) — reused from analysis.py.
         novelty = analysis.novelty_check(
             audio_path, self.reference_audio_path, self.reference_analysis,
             reference_embedding=self.reference_clap_embedding,
         )
-        result.novelty_audio_sim = novelty["audio_similarity"]
-        result.is_near_cover = novelty["is_near_cover"]
         if novelty["is_near_cover"]:
-            result.rejected_reason = "near_cover"
-            return result
+            logger.info("Iteration %d: near-cover (sim=%.2f), asking LLM to reformulate", n, novelty["audio_similarity"])
+            revised = self._request_reformulation(
+                messages, genome,
+                f"The generated candidate was judged a near-cover of the reference (audio similarity "
+                f"{novelty['audio_similarity']:.2f}, tempo delta {novelty['tempo_delta_frac']:.1%}). "
+                "Revise the plan to be more clearly original while keeping the same creative direction.",
+                iteration=n,
+            )
+            if revised is not None:
+                retry_result = await self.generator.generate_one(revised, seed=seed)
+                if not retry_result.error:
+                    genome, audio_path = revised, retry_result.audio_path
+                    novelty = analysis.novelty_check(
+                        audio_path, self.reference_audio_path, self.reference_analysis,
+                        reference_embedding=self.reference_clap_embedding,
+                    )
+            if novelty["is_near_cover"]:
+                return self._rejection_update(state, genome, seed, "near_cover", t0, audio_path=audio_path, novelty=novelty)
 
         adherence = analysis.constraint_adherence(audio_path, self.constraint_text)
-        result.adherence = adherence
         if adherence < self.adherence_tau:
-            result.rejected_reason = "constraint_not_met"
-            return result
-
-        result.passed_constraint = True
-        # reference_profile computed once in __init__ and reused here — see
-        # FINDINGS.md §8, this used to recompute the reference's TRIBE pass
-        # on every single candidate.
-        cand_profile = calibration.compute_profile_for_clip(self.model, self.bundle, Path(audio_path))
-        dist = calibration.score_candidate_against_profile(self.bundle, self.reference_profile, cand_profile)
-        result.D_brain = dist.D_brain
-        result.percentile = dist.percentile
-        result.d_spatial = dist.d_spatial
-        result.d_dynamics = dist.d_dynamics
-        result.d_geometry = dist.d_geometry
-
-        from . import metric as metric_mod
-        network_labels_masked = (
-            self.bundle.network_labels[self.bundle.vertex_mask] if self.bundle.network_labels is not None else None
-        )
-        result.per_network_deltas = metric_mod.per_network_deltas(cand_profile, self.reference_profile, network_labels_masked)
-        return result
-
-    def _build_gen0_prompt(self) -> tuple[str, str]:
-        system = (
-            "You are the creative director of Neural Echo, a system that composes original songs "
-            "engineered to evoke a similar predicted brain response (via Meta's TRIBE v2 brain-encoding "
-            "model) to a reference track, while satisfying a user's creative constraint and remaining "
-            "clearly original — never a clone of the reference. You propose ElevenLabs Music v2 "
-            "composition plans as structured genomes. You will iterate over several generations; explain "
-            "your reasoning in `hypothesis` every time, in plain language a non-expert user watching this "
-            "live can follow — that reasoning log is the point of this product."
-        )
-        user = {
-            "task": "Generation 0: propose maximally diverse genomes.",
-            "reference_track_analysis": self.reference_analysis,
-            "user_constraint": self.constraint_text,
-            "instructions": (
-                f"Propose exactly {self.batch_size} genomes with a wide spread across BPM, dynamic_arc, "
-                "and instrumentation — do not converge on one style yet. Every genome must independently "
-                "satisfy the user_constraint and must NOT closely imitate the reference's exact "
-                "instrumentation+tempo+key combination (that would be flagged as a near-cover and rejected)."
-            ),
-        }
-        return system, json.dumps(user, indent=2)
-
-    def _build_gen_n_prompt(self) -> tuple[str, str]:
-        system = (
-            "You are the creative director of Neural Echo (see prior context: composing songs that "
-            "evoke a similar brain response to a reference while satisfying a user constraint and staying "
-            "original). Use the run history and per-network diagnostics below to reason about what is "
-            "moving the score, then propose the next batch."
-        )
-        history_table = []
-        for gen in self.history:
-            for c in gen.candidates:
-                history_table.append({
-                    "generation": gen.generation_index,
-                    "bpm": c.genome.bpm, "dynamic_arc": c.genome.dynamic_arc.value,
-                    "instrumentation": c.genome.instrumentation,
-                    "D_brain": c.D_brain, "percentile": c.percentile,
-                    "d_spatial": c.d_spatial, "d_dynamics": c.d_dynamics, "d_geometry": c.d_geometry,
-                    "adherence": c.adherence, "novelty_audio_sim": c.novelty_audio_sim,
-                    "passed_constraint": c.passed_constraint, "rejected_reason": c.rejected_reason,
-                })
-
-        last_gen = self.history[-1]
-        scored = [c for c in last_gen.candidates if c.D_brain is not None]
-        best = min(scored, key=lambda c: c.D_brain) if scored else None
-        worst = max(scored, key=lambda c: c.D_brain) if scored else None
-
-        user = {
-            "user_constraint": self.constraint_text,
-            "noise_floor": self.bundle.floor,
-            "null_median": float(self.bundle.null_distribution.mean()),
-            "history": history_table,
-            "best_candidate_per_network_deltas_sigma": best.per_network_deltas if best else None,
-            "worst_candidate_per_network_deltas_sigma": worst.per_network_deltas if worst else None,
-            "learned_insights_so_far": self.learned_insights,
-            "instructions": (
-                f"Write a short hypothesis about what is driving the score. Then propose exactly "
-                f"{self.batch_size} new genomes: roughly half testing hypotheses about the best-scoring "
-                "region so far, half exploring genuinely different regions of the space. Neither half "
-                "should mean small, superficial tweaks — this is not hill-climbing by nudging one dial. "
-                "For the 'exploit' half: use best_candidate_per_network_deltas_sigma and "
-                "worst_candidate_per_network_deltas_sigma to form a real hypothesis about WHICH musical "
-                "dimension is driving the score (tempo vs. instrumentation vs. dynamic arc vs. harmonic "
-                "density vs. vocal presence), then change 2-3 parameters together in a way that tests that "
-                "hypothesis — a genome that only differs from the best one by, say, +2 BPM teaches us "
-                "nothing about why it scored well. For the 'explore' half: pick a region of the space "
-                "meaningfully far from everything tried so far (check the full history table, not just "
-                "this generation) — different instrumentation family, different dynamic_arc, different "
-                "tempo band — don't just re-run a near-duplicate of an earlier genome. Every genome must "
-                "still satisfy the user_constraint and avoid the near-cover rejection. Lower D_brain is "
-                "better; getting closer to noise_floor is the goal, but a lucky-looking early score is not "
-                "a reason to stop varying things meaningfully — convergence should be earned by ruling out "
-                "hypotheses across generations, not by repeating the first thing that scored decently. "
-                "Update learned_insights — carry forward what you've learned, don't just repeat it."
-            ),
-        }
-        return system, json.dumps(user, indent=2)
-
-    def _should_stop(self) -> str | None:
-        if len(self.history) >= self.max_generations:
-            return "max_generations"
-        if len(self.history) >= PLATEAU_GENERATIONS + 1:
-            recent_bests = []
-            for gen in self.history[-(PLATEAU_GENERATIONS + 1):]:
-                scored = [c.D_brain for c in gen.candidates if c.D_brain is not None]
-                if scored:
-                    recent_bests.append(min(scored))
-            if len(recent_bests) == PLATEAU_GENERATIONS + 1 and min(recent_bests[:-1]) <= recent_bests[-1]:
-                return "plateau"
-        last_gen = self.history[-1] if self.history else None
-        if last_gen:
-            scored = [c.D_brain for c in last_gen.candidates if c.D_brain is not None]
-            if scored:
-                best = min(scored)
-                span = float(self.bundle.null_distribution.mean()) - self.bundle.floor
-                if span > 1e-9 and (best - self.bundle.floor) <= FLOOR_PROXIMITY_STOP * 0.15 * span:
-                    return "near_floor"
-        return None
-
-    async def run(self) -> list[GenerationResult]:
-        while True:
-            gen_idx = len(self.history)
-            t0 = time.time()
-
-            if gen_idx == 0:
-                system, user = self._build_gen0_prompt()
-            else:
-                system, user = self._build_gen_n_prompt()
-
-            llm_out = self._call_llm(system, user)
-            hypothesis = llm_out.get("hypothesis", "")
-            self.learned_insights = llm_out.get("learned_insights", self.learned_insights)
-
-            genomes = []
-            schema_failures = 0
-            for raw in llm_out.get("genomes", []):
-                g = repair_genome(raw)
-                if g is None:
-                    schema_failures += 1
-                    continue
-                genomes.append(g)
-
-            # Elitism: carry the best 2 genomes forward untouched (no re-generation cost).
-            candidates: list[CandidateResult] = list(self.elite)
-            new_results = await self.generator.generate_batch(genomes)
-            for genome, gen_result in zip(genomes, new_results):
-                candidates.append(self._score_candidate(genome, gen_result.audio_path))
-
-            scored = [c for c in candidates if c.D_brain is not None]
-            best = min(scored, key=lambda c: c.D_brain) if scored else None
-            mean_D = float(sum(c.D_brain for c in scored) / len(scored)) if scored else None
-
-            gen_result = GenerationResult(
-                generation_index=gen_idx, hypothesis=hypothesis, learned_insights=self.learned_insights,
-                candidates=candidates, best=best, mean_D_brain=mean_D, elapsed_s=time.time() - t0,
+            logger.info("Iteration %d: constraint not met (adherence=%.2f), asking LLM to reformulate", n, adherence)
+            revised = self._request_reformulation(
+                messages, genome,
+                f"The generated candidate scored {adherence:.2f} on adherence to the user's creative "
+                f"constraint ('{self.constraint_text}'), below the required threshold "
+                f"{self.adherence_tau:.2f}. Revise the plan to satisfy this constraint more strongly.",
+                iteration=n,
             )
-            self.history.append(gen_result)
-            self._log_generation(gen_result)
+            if revised is not None:
+                retry_result = await self.generator.generate_one(revised, seed=seed)
+                if not retry_result.error:
+                    genome, audio_path = revised, retry_result.audio_path
+                    adherence = analysis.constraint_adherence(audio_path, self.constraint_text)
+            if adherence < self.adherence_tau:
+                return self._rejection_update(state, genome, seed, "constraint_not_met", t0, audio_path=audio_path, adherence=adherence, novelty=novelty)
 
-            if scored:
-                self.elite = sorted(scored, key=lambda c: c.D_brain)[:2]
+        # TRIBE + brain cost.
+        df = self.model.get_events_dataframe(audio_path=audio_path)
+        preds, _ = self.model.predict(events=df)
+        preds = np.asarray(preds)
+        cost = metric.compute_cost(preds, state["benchmark_preds"], self.regions)
 
-            if self.on_generation:
-                self.on_generation(gen_result)
+        is_best = cost.global_score < state["best_score"]
+        result = IterationResult(
+            iteration_index=n, reasoning=reasoning, changes_summary=changes_summary, plan=genome, seed=seed,
+            audio_path=audio_path, is_best=is_best, elapsed_s=time.time() - t0, cost=cost,
+            adherence=adherence, novelty_audio_sim=novelty["audio_similarity"], is_near_cover=False,
+        )
+        self._finish_iteration(result)
 
-            logger.info(
-                "Generation %d: %d candidates, %d scored, %d schema failures, best D_brain=%s, hypothesis=%r",
-                gen_idx, len(candidates), len(scored), schema_failures,
-                f"{best.D_brain:.4f}" if best else None, hypothesis[:120],
-            )
+        updates = {
+            "messages": messages + [HumanMessage(content=self._cost_message(genome, cost, n))],
+            "iterations_without_improvement": 0 if is_best else state["iterations_without_improvement"] + 1,
+        }
+        if is_best:
+            updates.update(best_score=cost.global_score, best_iteration=n,
+                            best_plan=genome.model_dump(), best_audio_path=audio_path)
+        return updates
 
-            stop_reason = self._should_stop()
-            if stop_reason:
-                logger.info("Stopping optimizer run: %s", stop_reason)
-                break
+    def _rejection_update(
+        self, state: OptimizerState, genome: Genome, seed: int, reason: str, t0: float,
+        audio_path: str | None = None, adherence: float | None = None, novelty: dict | None = None,
+    ) -> dict:
+        n = state["iteration"]
+        result = IterationResult(
+            iteration_index=n, reasoning=self._pending_reasoning, changes_summary=self._pending_changes_summary,
+            plan=genome, seed=seed, audio_path=audio_path, is_best=False, elapsed_s=time.time() - t0,
+            rejected_reason=reason, adherence=adherence,
+            novelty_audio_sim=(novelty or {}).get("audio_similarity"),
+            is_near_cover=(novelty or {}).get("is_near_cover"),
+        )
+        self._finish_iteration(result)
+        summary = (
+            f"Iteration {n} rejected ({reason}).\nPlan used:\n{genome.model_dump_json(indent=2)}\n\n"
+            "This candidate was never scored against the brain-response benchmark — fix the "
+            "underlying problem in your next plan."
+        )
+        return {
+            "messages": state["messages"] + [HumanMessage(content=summary)],
+            "iterations_without_improvement": state["iterations_without_improvement"] + 1,
+        }
 
+    def _finish_iteration(self, result: IterationResult):
+        self.history.append(result)
+        self._log_iteration(result)
+        if self.on_iteration:
+            self.on_iteration(result)
+        logger.info(
+            "Iteration %d done: rejected=%s cost=%s is_best=%s",
+            result.iteration_index, result.rejected_reason,
+            f"{result.cost.global_score:.4f}" if result.cost else None, result.is_best,
+        )
+
+    def _node_compress_memory(self, state: OptimizerState) -> dict:
+        messages = state["messages"]
+        approx_tokens = sum(len(m.content) for m in messages) // 4
+        keep_count = DETAIL_ITERATIONS * 2
+        if approx_tokens < SUMMARIZE_TOKEN_THRESHOLD or len(messages) <= keep_count:
+            return {}
+
+        to_summarize, to_keep = messages[:-keep_count], messages[-keep_count:]
+        logger.info("Compressing %d old messages (~%d tokens estimated)", len(to_summarize), approx_tokens)
+
+        summary_request = HumanMessage(content=(
+            "Summarize the iterations above as a compact TABLE. One row per iteration, columns: "
+            "iteration, changes_made, resulting_score, effect (improved/worsened/same). Max 15 lines "
+            "total. This is memory — the LLM will use it to avoid repeating failed attempts."
+        ))
+        response = self.llm.invoke(
+            [SystemMessage(content="Summarizer of experimental history.")] + to_summarize + [summary_request]
+        )
+        new_summary = (
+            (state["memory_summary"] + "\n\n" if state["memory_summary"] else "")
+            + f"[Summary through iteration {state['iteration'] - len(to_keep) // 2}]\n{response.content}"
+        )
+        return {"messages": to_keep, "memory_summary": new_summary}
+
+    def _node_propose_next_plan(self, state: OptimizerState) -> dict:
+        context = [SystemMessage(content=self._system_prompt(state["iteration"]))]
+        if state["memory_summary"]:
+            context.append(HumanMessage(content=f"SUMMARY OF EARLIER ITERATIONS (compressed):\n{state['memory_summary']}"))
+        context.extend(state["messages"])
+        context.append(HumanMessage(content=(
+            f"Iteration {state['iteration'] + 1}/{self.max_iterations}. "
+            f"Best score so far: {state['best_score']:.4f} (lower is better). "
+            "Propose the next plan. ONLY JSON."
+        )))
+
+        response = self.llm.invoke(context)
+        parsed = parse_llm_json(response.content)
+        genome = repair_genome(parsed.get("plan", {}))
+        if genome is None:
+            raise RuntimeError(f"Proposed plan failed validation and could not be repaired: {parsed}")
+
+        reasoning = parsed.get("reasoning", "")
+        changes_summary = parsed.get("changes", parsed.get("changes_summary", ""))
+        logger.info("Iteration %d proposal — reasoning: %s", state["iteration"] + 1, reasoning[:160])
+
+        new_seed = state["seed"]
+        if parsed.get("change_seed"):
+            new_seed = random.randint(1, 2**31 - 1)
+            logger.info("LLM requested a seed change -> %d", new_seed)
+
+        # Stash reasoning/changes_summary for the NEXT generate_and_score call to
+        # attach to its IterationResult (the LLM's rationale for the plan it just
+        # produced belongs to the iteration that plan runs in, not this one).
+        self._pending_reasoning = reasoning
+        self._pending_changes_summary = changes_summary
+
+        return {
+            "plan": genome.model_dump(),
+            "iteration": state["iteration"] + 1,
+            "seed": new_seed,
+            "messages": state["messages"] + [AIMessage(content=response.content)],
+        }
+
+    def _should_continue(self, state: OptimizerState) -> str:
+        if state["best_score"] < SUCCESS_THRESHOLD:
+            logger.info("Success threshold reached (%.4f < %.4f)", state["best_score"], SUCCESS_THRESHOLD)
+            return "stop"
+        if state["iterations_without_improvement"] >= PATIENCE:
+            logger.info("Patience exhausted (%d iterations without improvement)", state["iterations_without_improvement"])
+            return "stop"
+        if state["iteration"] >= self.max_iterations:
+            logger.info("Max iterations reached (%d)", self.max_iterations)
+            return "stop"
+        return "continue"
+
+    def _build_graph(self):
+        graph = StateGraph(OptimizerState)
+        graph.add_node("generate_and_score", self._node_generate_and_score)
+        graph.add_node("compress_memory", self._node_compress_memory)
+        graph.add_node("propose_next_plan", self._node_propose_next_plan)
+        graph.set_entry_point("generate_and_score")
+        graph.add_edge("generate_and_score", "compress_memory")
+        graph.add_conditional_edges(
+            "compress_memory", self._should_continue,
+            {"continue": "propose_next_plan", "stop": END},
+        )
+        graph.add_edge("propose_next_plan", "generate_and_score")
+        return graph.compile()
+
+    async def run(self) -> list[IterationResult]:
+        logger.info("Building initial plan from reference audio analysis...")
+        initial_genome = self._build_initial_plan()
+
+        logger.info("Running TRIBE on the reference (benchmark)...")
+        df_ref = self.model.get_events_dataframe(audio_path=self.reference_audio_path)
+        bench_preds, _ = self.model.predict(events=df_ref)
+        benchmark_preds = np.asarray(bench_preds)
+
+        initial_state: OptimizerState = {
+            "plan": initial_genome.model_dump(),
+            "seed": random.randint(1, 2**31 - 1),
+            "iteration": 1,
+            "benchmark_preds": benchmark_preds,
+            "best_score": float("inf"),
+            "best_iteration": None,
+            "best_plan": None,
+            "best_audio_path": None,
+            "iterations_without_improvement": 0,
+            "messages": [],
+            "memory_summary": "",
+        }
+
+        # recursion_limit: 3 nodes per iteration, generous headroom over max_iterations.
+        await self.graph.ainvoke(initial_state, config={"recursion_limit": self.max_iterations * 3 + 10})
         return self.history

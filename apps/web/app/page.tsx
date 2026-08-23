@@ -14,8 +14,7 @@ export default function Home() {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [constraintText, setConstraintText] = useState("");
-  const [maxGenerations, setMaxGenerations] = useState(6);
-  const [batchSize, setBatchSize] = useState(10);
+  const [maxIterations, setMaxIterations] = useState(10);
   const [adherenceTau, setAdherenceTau] = useState(0.15);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,8 +32,7 @@ export default function Home() {
         constraintText: constraintText.trim(),
         youtubeUrl: mode === "youtube" ? youtubeUrl.trim() : undefined,
         file: mode === "file" ? file ?? undefined : undefined,
-        maxGenerations,
-        batchSize,
+        maxIterations,
         adherenceTau,
       });
       router.push(`/run/${job_id}`);
@@ -79,10 +77,8 @@ export default function Home() {
         </section>
 
         <AdvancedSettings
-          maxGenerations={maxGenerations}
-          onMaxGenerationsChange={setMaxGenerations}
-          batchSize={batchSize}
-          onBatchSizeChange={setBatchSize}
+          maxIterations={maxIterations}
+          onMaxIterationsChange={setMaxIterations}
           adherenceTau={adherenceTau}
           onAdherenceTauChange={setAdherenceTau}
         />
