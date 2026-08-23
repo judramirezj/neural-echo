@@ -46,6 +46,7 @@ PATIENCE = 3                      # stop after this many iterations without impr
 DETAIL_ITERATIONS = 3             # most recent iterations kept in full detail in `messages`
 SUMMARIZE_TOKEN_THRESHOLD = 40_000
 MAX_REFORMULATION_ATTEMPTS = 3    # bounded retries when ElevenLabs rejects a plan outright
+PHASE_1_ITERATIONS = 3            # iterations 1..PHASE_1_ITERATIONS raise specificity; after that, optimize direction
 
 CONTENT_POLICY_MARKERS = ("bad_composition_plan", "Terms of Service")
 
@@ -69,6 +70,8 @@ adjectives (energetic, dark, powerful) have weak effect.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR STRATEGY, BY PHASE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{current_phase_note}
 
 PHASE 1 (iterations 1-3): RAISE SPECIFICITY
 The initial plan is generic. Before changing direction, densify the existing plan by covering
@@ -151,6 +154,22 @@ change_seed:
   - false by default (keeps the seed fixed for clean attribution)
   - true ONLY if you've had {patience}+ iterations without improvement and already tried
     significant prompt changes. Explain why in "reasoning"."""
+
+
+def response_text(content) -> str:
+    """ChatAnthropic's AIMessage.content is a plain str for simple replies but a
+    list of content blocks (e.g. [{"type": "text", "text": "..."}]) whenever the
+    underlying API response has multiple blocks — normalize both shapes to a
+    single string everywhere a response is parsed as text."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
 
 
 def parse_llm_json(text: str) -> dict:
@@ -276,11 +295,43 @@ class OptimizerRun:
         conn.commit()
         conn.close()
 
+    def _llm_json(self, context: list[BaseMessage], max_attempts: int = 3) -> tuple[str, dict]:
+        """Invoke the LLM and parse its response as JSON, retrying with a
+        corrective follow-up message if the response isn't valid JSON. Claude
+        occasionally garbles strict JSON on a long, complex plan despite
+        instructions — a single-lineage run has no other candidate to fall back
+        on, so this failure mode has to be handled here rather than left to
+        crash the whole run. Returns (raw_response_text, parsed_dict)."""
+        messages = list(context)
+        last_error: Exception | None = None
+        for attempt in range(max_attempts):
+            response = self.llm.invoke(messages)
+            text = response_text(response.content)
+            try:
+                return text, parse_llm_json(text)
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning("LLM response wasn't valid JSON (attempt %d/%d): %s", attempt + 1, max_attempts, e)
+                messages = messages + [
+                    AIMessage(content=text),
+                    HumanMessage(content=(
+                        f"Your last response was not valid JSON ({e}). Respond again with ONLY the "
+                        "valid JSON object, no extra text, no markdown fences."
+                    )),
+                ]
+        raise RuntimeError(f"LLM did not return valid JSON after {max_attempts} attempts: {last_error}")
+
     def _system_prompt(self, iteration: int) -> str:
         from .generator import MAX_CHUNK_S, MAX_TOTAL_S, MIN_CHUNK_S
 
         target_duration_ms = int(self.reference_analysis["duration_s"] * 1000)
+        current_phase_note = (
+            f"You are currently on iteration {iteration}, which is in PHASE 1 (raise specificity)."
+            if iteration <= PHASE_1_ITERATIONS else
+            f"You are currently on iteration {iteration}, which is in PHASE 2 (optimize direction)."
+        )
         return SYSTEM_PROMPT_TEMPLATE.format(
+            current_phase_note=current_phase_note,
             constraint_text=self.constraint_text,
             target_duration_ms=target_duration_ms,
             min_chunk_ms=MIN_CHUNK_S * 1000,
@@ -313,8 +364,7 @@ class OptimizerRun:
             "user_constraint": self.constraint_text,
             "target_duration_ms": target_duration_ms,
         }, indent=2)
-        response = self.llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-        parsed = parse_llm_json(response.content)
+        _, parsed = self._llm_json([SystemMessage(content=system), HumanMessage(content=user)])
         genome = repair_genome(parsed)
         if genome is None:
             raise RuntimeError(f"Initial plan failed validation and could not be repaired: {parsed}")
@@ -336,14 +386,13 @@ class OptimizerRun:
             )),
         ]
         try:
-            response = self.llm.invoke(context)
-            parsed = parse_llm_json(response.content)
+            _, parsed = self._llm_json(context)
             revised = repair_genome(parsed.get("plan", parsed))
             if revised is None:
                 logger.warning("Reformulation response failed validation/repair: %s", parsed)
             return revised
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning("Could not parse reformulation response: %s", e)
+        except RuntimeError as e:
+            logger.warning("Could not get a valid reformulation: %s", e)
             return None
 
     @staticmethod
@@ -512,12 +561,14 @@ class OptimizerRun:
         )
         new_summary = (
             (state["memory_summary"] + "\n\n" if state["memory_summary"] else "")
-            + f"[Summary through iteration {state['iteration'] - len(to_keep) // 2}]\n{response.content}"
+            + f"[Summary through iteration {state['iteration'] - len(to_keep) // 2}]\n{response_text(response.content)}"
         )
         return {"messages": to_keep, "memory_summary": new_summary}
 
     def _node_propose_next_plan(self, state: OptimizerState) -> dict:
-        context = [SystemMessage(content=self._system_prompt(state["iteration"]))]
+        # The system prompt's phase note is for the iteration this plan will run
+        # in (state["iteration"] + 1), not the one that just finished.
+        context = [SystemMessage(content=self._system_prompt(state["iteration"] + 1))]
         if state["memory_summary"]:
             context.append(HumanMessage(content=f"SUMMARY OF EARLIER ITERATIONS (compressed):\n{state['memory_summary']}"))
         context.extend(state["messages"])
@@ -527,8 +578,7 @@ class OptimizerRun:
             "Propose the next plan. ONLY JSON."
         )))
 
-        response = self.llm.invoke(context)
-        parsed = parse_llm_json(response.content)
+        response_str, parsed = self._llm_json(context)
         genome = repair_genome(parsed.get("plan", {}))
         if genome is None:
             raise RuntimeError(f"Proposed plan failed validation and could not be repaired: {parsed}")
@@ -552,7 +602,7 @@ class OptimizerRun:
             "plan": genome.model_dump(),
             "iteration": state["iteration"] + 1,
             "seed": new_seed,
-            "messages": state["messages"] + [AIMessage(content=response.content)],
+            "messages": state["messages"] + [AIMessage(content=response_str)],
         }
 
     def _should_continue(self, state: OptimizerState) -> str:
